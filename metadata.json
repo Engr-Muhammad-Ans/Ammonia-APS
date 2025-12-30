@@ -1,0 +1,5 @@
+{
+  "name": "Ammonia Plant Material Balance",
+  "description": "A high-precision engineering calculator for material balance across Primary Reformers, Secondary Reformers, and Shift Converters in an Ammonia production facility.",
+  "requestFramePermissions": []
+}
