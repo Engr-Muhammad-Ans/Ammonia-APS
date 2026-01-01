@@ -230,7 +230,7 @@ const App: React.FC = () => {
     doc.text('Ammonia Plant', 105, 15, { align: 'center' });
     doc.setFontSize(12);
     doc.setTextColor(100, 116, 139); 
-    doc.text('Material Balance Simulator', 105, 22, { align: 'center' });
+    doc.text('Process Simulator (APS)', 105, 22, { align: 'center' });
     doc.setFontSize(14);
     doc.setTextColor(37, 99, 235); 
     doc.text(tabName, 105, 32, { align: 'center' });
@@ -298,7 +298,7 @@ const App: React.FC = () => {
                    activeTab === 'methanator' ? 'Methanator' : 
                    activeTab === 'ammoniaReactor' ? 'Ammonia Reactor' : 'Simulation Trends';
     
-    let content: any[][] = [['Ammonia Plant'], ['Material Balance Simulator'], [`Tab: ${tabName}`], []];
+    let content: any[][] = [['Ammonia Plant'], ['Process Simulator (APS)'], [`Tab: ${tabName}`], []];
     const streamToRows = (title: string, data: StreamData, comps: ComponentKey[] = COMPONENTS) => {
       const dryTotal = data.totalMoles - (data.moles.H2O || 0);
       return [[title], ['Component', 'Kgmol/hr', 'NMC/hr', 'Wet mol%', 'Dry mol%'], ...comps.map(c => [c, data.moles[c], data.moles[c] * CONVERSION_FACTOR, (data.moles[c] / data.totalMoles) * 100, c === 'H2O' ? 0 : (data.moles[c] / dryTotal) * 100]), ['Total Sum', data.totalMoles, data.totalVolume, 100, 100], []];
@@ -353,7 +353,7 @@ const App: React.FC = () => {
               Ammonia
             </h1>
             <h2 className="text-2xl md:text-4xl font-bold tracking-tight text-emerald-400/90">
-              Material Balance Simulator (MBS)
+              Process Simulator (APS)
             </h2>
           </div>
           <button 
@@ -385,12 +385,12 @@ const App: React.FC = () => {
             <i className="fas fa-industry text-2xl text-emerald-400"></i>
             <div>
               <h1 className="text-xl font-bold tracking-tight">Ammonia Plant</h1>
-              <p className="text-xs text-slate-400 uppercase tracking-widest font-semibold">Material Balance Simulator</p>
+              <p className="text-xs text-slate-400 uppercase tracking-widest font-semibold">Process Simulator (APS)</p>
             </div>
           </div>
           <button 
             onClick={() => setIsAboutOpen(true)}
-            aria-label="About Ammonia-MBS"
+            aria-label="About Ammonia-APS"
             className="flex items-center justify-center bg-slate-800 hover:bg-slate-700 text-white w-10 h-10 sm:w-auto sm:px-4 sm:h-10 rounded-full sm:rounded-lg transition-all border border-slate-700 shadow-sm"
           >
             <i className="fas fa-info-circle text-emerald-400 text-lg"></i>
@@ -412,7 +412,7 @@ const App: React.FC = () => {
             <div className="bg-slate-800 p-4 text-white flex justify-between items-center flex-shrink-0">
               <div className="flex items-center space-x-3">
                 <i className="fas fa-info-circle text-emerald-400"></i>
-                <h2 className="text-lg font-bold">About Ammonia-MBS</h2>
+                <h2 className="text-lg font-bold">About Ammonia-APS</h2>
               </div>
               <button 
                 onClick={() => setIsAboutOpen(false)}
@@ -425,7 +425,7 @@ const App: React.FC = () => {
             <div className="p-6 md:p-8 overflow-y-auto space-y-6 text-slate-600 leading-relaxed text-sm md:text-base border-b border-slate-100 bg-white">
               <div className="space-y-4">
                 <p className="font-semibold text-slate-900 border-l-4 border-emerald-500 pl-4 bg-slate-50 py-2 rounded">
-                  Ammonia Material Balance Simulator (MBS) is an interactive engineering tool designed to perform detailed material balance calculations across an entire ammonia plant.
+                  Ammonia Process Simulator (APS) is an interactive engineering tool designed to perform detailed material balance calculations across an entire ammonia plant.
                 </p>
                 <p>
                   The simulator allows users to define feed compositions, operating conditions, and conversion parameters, and instantly visualize their impact across major process units including reformers, shift converters, methanator, and ammonia reactor. Both wet and dry mole fractions, mass and volumetric flows, and key performance indicators such as Carbon Number, Steam-to-Carbon ratio, Front End Load, ΔT, ΔP, and H/N ratio are calculated dynamically.
@@ -619,21 +619,21 @@ const App: React.FC = () => {
                     <div className="bg-orange-50/50 p-4 rounded-lg border border-orange-100">
                       <label className="block text-xs font-bold text-orange-700 uppercase">Secondary CH4 Conversion</label>
                       <div className="relative mt-2">
-                        <input type="number" step="0.0001" min="0" max="100" onFocus={handleFocus} value={params.secondaryCh4Conv === 0 ? "0" : Number((params.secondaryCh4Conv * 100).toFixed(4))} onChange={e => setParams({...params, secondaryCh4Conv: (parseFloat(e.target.value) || 0) / 100})} className="w-full border border-orange-200 rounded-md p-3 pr-12 font-mono text-lg text-orange-700 focus:ring-2 focus:ring-orange-500 outline-none bg-white shadow-inner"/>
+                        <input type="number" step="0.0001" min="0" max="100" onFocus={handleFocus} value={params.secondaryCh4Conv === 0 ? "0" : Number((params.secondaryCh4Conv * 100).toFixed(4))} onChange={e => setParams({...params, secondaryCh4Conv: (parseFloat(e.target.value) || 0) / 100})} className="w-full border border-orange-200 rounded-md p-3 pr-12 font-mono text-lg text-orange-700 focus:ring-2 focus:ring-blue-500 outline-none bg-white shadow-inner"/>
                         <span className="absolute right-4 top-3.5 text-lg font-mono font-bold text-orange-400">%</span>
                       </div>
                     </div>
                     <div className="bg-orange-50/50 p-4 rounded-lg border border-orange-100">
                       <label className="block text-xs font-bold text-orange-700 uppercase">Secondary CO Conversion</label>
                       <div className="relative mt-2">
-                        <input type="number" step="0.0001" min="0" max="100" onFocus={handleFocus} value={params.secondaryCoConv === 0 ? "0" : Number((params.secondaryCoConv * 100).toFixed(4))} onChange={e => setParams({...params, secondaryCoConv: (parseFloat(e.target.value) || 0) / 100})} className="w-full border border-orange-200 rounded-md p-3 pr-12 font-mono text-lg text-orange-700 focus:ring-2 focus:ring-orange-500 outline-none bg-white shadow-inner"/>
+                        <input type="number" step="0.0001" min="0" max="100" onFocus={handleFocus} value={params.secondaryCoConv === 0 ? "0" : Number((params.secondaryCoConv * 100).toFixed(4))} onChange={e => setParams({...params, secondaryCoConv: (parseFloat(e.target.value) || 0) / 100})} className="w-full border border-orange-200 rounded-md p-3 pr-12 font-mono text-lg text-orange-700 focus:ring-2 focus:ring-blue-500 outline-none bg-white shadow-inner"/>
                         <span className="absolute right-4 top-3.5 text-lg font-mono font-bold text-orange-400">%</span>
                       </div>
                     </div>
                     <div className="bg-orange-50/50 p-4 rounded-lg border border-orange-100">
                       <label className="block text-xs font-bold text-orange-700 uppercase">Secondary O2 Conversion</label>
                       <div className="relative mt-2">
-                        <input type="number" step="0.0001" min="0" max="100" onFocus={handleFocus} value={params.secondaryO2Conv === 0 ? "0" : Number((params.secondaryO2Conv * 100).toFixed(4))} onChange={e => setParams({...params, secondaryO2Conv: (parseFloat(e.target.value) || 0) / 100})} className="w-full border border-orange-200 rounded-md p-3 pr-12 font-mono text-lg text-orange-700 focus:ring-2 focus:ring-orange-500 outline-none bg-white shadow-inner"/>
+                        <input type="number" step="0.0001" min="0" max="100" onFocus={handleFocus} value={params.secondaryO2Conv === 0 ? "0" : Number((params.secondaryO2Conv * 100).toFixed(4))} onChange={e => setParams({...params, secondaryO2Conv: (parseFloat(e.target.value) || 0) / 100})} className="w-full border border-orange-200 rounded-md p-3 pr-12 font-mono text-lg text-orange-700 focus:ring-2 focus:ring-blue-500 outline-none bg-white shadow-inner"/>
                         <span className="absolute right-4 top-3.5 text-lg font-mono font-bold text-orange-400">%</span>
                       </div>
                     </div>
@@ -671,7 +671,7 @@ const App: React.FC = () => {
               <div className="bg-white p-6 rounded-lg border border-emerald-200 shadow-sm border-l-4 border-l-emerald-600">
                 <div className="flex flex-col space-y-4">
                   <div className="flex items-center space-x-3 border-b border-gray-100 pb-3"><div className="bg-emerald-100 p-2 rounded-full"><i className="fas fa-angle-double-down text-emerald-600"></i></div><h3 className="text-lg font-bold text-gray-800">LTS Shift Control Station</h3></div>
-                  <div className="bg-emerald-50/50 p-4 rounded-lg border border-emerald-100 max-w-sm"><label className="block text-xs font-bold text-emerald-700 uppercase">LTS CO Conversion</label><div className="relative mt-2"><input type="number" step="0.0001" min="0" max="100" onFocus={handleFocus} value={params.ltsCoConv === 0 ? "0" : Number((params.ltsCoConv * 100).toFixed(4))} onChange={e => setParams({...params, ltsCoConv: (parseFloat(e.target.value) || 0) / 100})} className="w-full border border-emerald-200 rounded-md p-3 pr-12 font-mono text-lg text-emerald-700 focus:ring-2 focus:ring-emerald-500 outline-none bg-white shadow-inner"/><span className="absolute right-4 top-3.5 text-lg font-mono font-bold text-emerald-400">%</span></div></div>
+                  <div className="bg-emerald-50/50 p-4 rounded-lg border border-emerald-100 max-w-sm"><label className="block text-xs font-bold text-emerald-700 uppercase">LTS CO Conversion</label><div className="relative mt-2"><input type="number" step="0.0001" min="0" max="100" onFocus={handleFocus} value={params.ltsCoConv === 0 ? "0" : Number((params.ltsCoConv * 100).toFixed(4))} onChange={e => setParams({...params, ltsCoConv: (parseFloat(e.target.value) || 0) / 100})} className="w-full border border-emerald-200 rounded-md p-3 pr-12 font-mono text-lg text-emerald-700 focus:ring-2 focus:ring-blue-500 outline-none bg-white shadow-inner"/><span className="absolute right-4 top-3.5 text-lg font-mono font-bold text-emerald-400">%</span></div></div>
                   {renderOpControlRow('lts')}
                 </div>
               </div>
@@ -730,7 +730,7 @@ const App: React.FC = () => {
                     <div className="bg-indigo-50/50 p-4 rounded-lg border border-indigo-100">
                       <label className="block text-xs font-bold text-indigo-700 uppercase">Reactor Nitrogen Conversion</label>
                       <div className="relative mt-2">
-                        <input type="number" step="0.0001" min="0" max="100" onFocus={handleFocus} value={params.reactorConv === 0 ? "0" : Number((params.reactorConv * 100).toFixed(4))} onChange={e => setParams({...params, reactorConv: (parseFloat(e.target.value) || 0) / 100})} className="w-full border border-indigo-200 rounded-md p-3 pr-12 font-mono text-lg text-indigo-700 focus:ring-2 focus:ring-indigo-500 outline-none bg-white shadow-inner"/>
+                        <input type="number" step="0.0001" min="0" max="100" onFocus={handleFocus} value={params.reactorConv === 0 ? "0" : Number((params.reactorConv * 100).toFixed(4))} onChange={e => setParams({...params, reactorConv: (parseFloat(e.target.value) || 0) / 100})} className="w-full border border-indigo-200 rounded-md p-3 pr-12 font-mono text-lg text-indigo-700 focus:ring-2 focus:ring-blue-500 outline-none bg-white shadow-inner"/>
                         <span className="absolute right-4 top-3.5 text-lg font-mono font-bold text-indigo-400">%</span>
                       </div>
                     </div>
