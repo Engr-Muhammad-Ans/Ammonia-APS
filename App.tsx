@@ -223,7 +223,7 @@ const App: React.FC = () => {
                    activeTab === 'hts' ? 'HTS Shift' : 
                    activeTab === 'lts' ? 'LTS Shift' : 
                    activeTab === 'methanator' ? 'Methanator' : 
-                   activeTab === 'ammoniaReactor' ? 'Ammonia Reactor' : 'Simulation Insights';
+                   activeTab === 'ammoniaReactor' ? 'Ammonia Reactor' : 'Simulation Trends';
     
     doc.setFontSize(18);
     doc.setTextColor(15, 23, 42); 
@@ -296,7 +296,7 @@ const App: React.FC = () => {
                    activeTab === 'hts' ? 'HTS Shift' : 
                    activeTab === 'lts' ? 'LTS Shift' : 
                    activeTab === 'methanator' ? 'Methanator' : 
-                   activeTab === 'ammoniaReactor' ? 'Ammonia Reactor' : 'Simulation Insights';
+                   activeTab === 'ammoniaReactor' ? 'Ammonia Reactor' : 'Simulation Trends';
     
     let content: any[][] = [['Ammonia Plant'], ['Material Balance Simulator'], [`Tab: ${tabName}`], []];
     const streamToRows = (title: string, data: StreamData, comps: ComponentKey[] = COMPONENTS) => {
@@ -471,11 +471,18 @@ const App: React.FC = () => {
             { id: 'lts', label: 'LTS Shift', icon: 'fa-angle-double-down' },
             { id: 'methanator', label: 'Methanator', icon: 'fa-flask-vial' },
             { id: 'ammoniaReactor', label: 'Ammonia Reactor', icon: 'fa-vial-circle-check' },
-            { id: 'charts', label: 'Insights', icon: 'fa-project-diagram' }
+            { id: 'charts', label: 'Simulation Trends', icon: 'fa-chart-line' },
+            { id: 'external-insights', label: 'Ammonia Insights', icon: 'fa-external-link-alt', isExternal: true }
           ].map(tab => (
             <button
               key={tab.id}
-              onClick={() => setActiveTab(tab.id as any)}
+              onClick={() => {
+                if ((tab as any).isExternal) {
+                  window.open('https://ammonia-insights.vercel.app/', '_blank');
+                } else {
+                  setActiveTab(tab.id as any);
+                }
+              }}
               className={`flex items-center space-x-2 px-6 py-3 text-sm font-semibold transition-all rounded-md ${
                 activeTab === tab.id ? 'bg-blue-600 text-white shadow-md transform scale-105' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700'
               }`}
