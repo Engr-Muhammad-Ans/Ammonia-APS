@@ -1,5 +1,5 @@
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { 
   calculateStreamDerivedData, 
   calculatePrimaryReformer, 
@@ -9,28 +9,51 @@ import {
   calculateAmmoniaReactor
 } from './services/balanceService';
 import { ComponentKey, StreamData } from './types';
-import { INITIAL_MOLES, COMPONENTS, CONVERSION_FACTOR } from './constants';
+import { COMPONENTS, CONVERSION_FACTOR } from './constants';
 import StreamTable from './components/StreamTable';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { jsPDF } from 'jspdf';
-import 'jspdf-autotable';
+import autoTable from 'jspdf-autotable';
 import * as XLSX from 'xlsx';
 
 const App: React.FC = () => {
   const [showLanding, setShowLanding] = useState(true);
-  const [inletFeed, setInletFeed] = useState<Record<ComponentKey, number>>(INITIAL_MOLES);
   const [isAboutOpen, setIsAboutOpen] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   
-  // Plant Feed Rates
+  // --- 1. Process Gas Specification (Dry) ---
+  const [processGasPercents, setProcessGasPercents] = useState<Record<ComponentKey, number>>(() => {
+    const p: any = {}; COMPONENTS.forEach(c => p[c] = 0);
+    p.CH4 = 95.0; p.C2H6 = 2.5; p.CO2 = 0.5; p.H2 = 2.0;
+    return p;
+  });
   const [processGasFlow, setProcessGasFlow] = useState<number>(100000);
-  const [recycleGasFlow, setRecycleGasFlow] = useState<number>(5000);
-  const [steamFlow, setSteamFlow] = useState<number>(250);
 
-  // Design Parameters for Front End Load
+  // --- 2. Recycle Gas Specification (Dry) ---
+  const [recycleGasPercents, setRecycleGasPercents] = useState<Record<ComponentKey, number>>(() => {
+    const r: any = {}; COMPONENTS.forEach(c => r[c] = 0);
+    r.H2 = 74.0; r.N2 = 20.0; r.CH4 = 5.0; r.AR = 0.3; r.NH3 = 0.7;
+    return r;
+  });
+  const [recycleGasFlow, setRecycleGasFlow] = useState<number>(5000);
+
+  // --- 3. Steam Specification ---
+  const [steamFlowTons, setSteamFlowTons] = useState<number>(130);
+
+  // --- 4. Air Feed Specification ---
+  const [airPercents, setAirPercents] = useState<Record<ComponentKey, number>>(() => {
+    const a: any = {}; COMPONENTS.forEach(c => a[c] = 0);
+    a.N2 = 78.08; a.O2 = 20.95; a.AR = 0.93; a.CO2 = 0.04;
+    return a;
+  });
+  const [processAirFlow, setProcessAirFlow] = useState<number>(35000);
+  const [relativeHumidity, setRelativeHumidity] = useState<number>(60);
+  const [ambientTemp, setAmbientTemp] = useState<number>(30);
+
+  // --- Design Basis ---
   const [designProcessGasFlow, setDesignProcessGasFlow] = useState<number>(110000);
   const [designCarbonNumber, setDesignCarbonNumber] = useState<number>(1.05);
 
-  // Operational Parameters (Temperature and Pressure)
+  // --- Operational Parameters (T, P) ---
   const [opParams, setOpParams] = useState({
     primary: { tin: 520, tout: 810, pin: 35.0, pout: 32.5 },
     secondary: { tin: 810, tout: 980, pin: 32.0, pout: 31.0 },
@@ -40,339 +63,539 @@ const App: React.FC = () => {
     ammoniaReactor: { tin: 380, tout: 450, pin: 150.0, pout: 145.0 },
   });
 
-  // State for Air Feed
-  const [airMoles, setAirMoles] = useState<Record<ComponentKey, number>>(() => {
-    const totalNmc = 15000;
-    const totalMoles = totalNmc / CONVERSION_FACTOR;
-    return {
-      AR: totalMoles * 0.0097,
-      C2H6: 0,
-      CH4: 0,
-      CO: 0,
-      CO2: totalMoles * 0.0003,
-      H2: 0,
-      N2: totalMoles * 0.7808,
-      NH3: 0,
-      O2: totalMoles * 0.2092,
-      H2O: 0
-    };
-  });
-
+  // --- Conversion Parameters ---
   const [params, setParams] = useState({
-    primaryCh4Conv: 0.85,
-    primaryC2h6Conv: 1.0,
-    primaryCoConv: 0.5,
-    secondaryCh4Conv: 0.95,
-    secondaryCoConv: 0.3,
-    secondaryO2Conv: 1.0, // Defaulting to 100% O2 conversion for combustion
-    htsCoConv: 0.90,
-    ltsCoConv: 0.95,
-    methanatorCoConv: 0.9999,
-    methanatorCo2Conv: 0.9999,
-    reactorConv: 0.15, // Single pass conversion
+    primaryCh4Conv: 0.65, primaryC2h6Conv: 1.0, primaryCoConv: 0.1,
+    secondaryCh4Conv: 0.95, secondaryCoConv: 0.15, secondaryO2Conv: 1.0,
+    htsCoConv: 0.8, ltsCoConv: 0.95,
+    methanatorCoConv: 1.0, methanatorCo2Conv: 1.0,
+    reactorConv: 0.15,
   });
 
-  const [activeTab, setActiveTab] = useState<'inputs' | 'primary' | 'secondary' | 'hts' | 'lts' | 'methanator' | 'ammoniaReactor' | 'charts'>('inputs');
+  // --- Inlet Overrides ---
+  const [customMethanatorInlet, setCustomMethanatorInlet] = useState<Record<ComponentKey, number> | null>(null);
+  const [customReactorInlet, setCustomReactorInlet] = useState<Record<ComponentKey, number> | null>(null);
 
-  const [methanatorInletMoles, setMethanatorInletMoles] = useState<Record<ComponentKey, number> | null>(null);
-  const [ammoniaReactorInletMoles, setAmmoniaReactorInletMoles] = useState<Record<ComponentKey, number> | null>(null);
+  const tabs = [
+    { id: 'inputs', label: 'Feed & Config', icon: 'fa-vials' },
+    { id: 'primary', label: 'Primary Reformer', icon: 'fa-fire-alt' },
+    { id: 'secondary', label: 'Secondary Reformer', icon: 'fa-wind' },
+    { id: 'hts', label: 'HTS Shift', icon: 'fa-angle-double-up' },
+    { id: 'lts', label: 'LTS Shift', icon: 'fa-angle-double-down' },
+    { id: 'methanator', label: 'Methanator', icon: 'fa-flask-vial' },
+    { id: 'ammoniaReactor', label: 'Ammonia Reactor', icon: 'fa-vial-circle-check' },
+    { id: 'external_insights', label: 'Ammonia Insights', icon: 'fa-chart-line', isExternal: true },
+  ];
+
+  const [activeTab, setActiveTab] = useState<string>('inputs');
+
+  const currentTabLabel = useMemo(() => tabs.find(t => t.id === activeTab)?.label || "", [activeTab]);
+
+  // --- Persistance Logic ---
+  useEffect(() => {
+    const savedData = localStorage.getItem('aps_simulation_data');
+    if (savedData) {
+      try {
+        const parsed = JSON.parse(savedData);
+        if (parsed.processGasPercents) setProcessGasPercents(parsed.processGasPercents);
+        if (parsed.processGasFlow) setProcessGasFlow(parsed.processGasFlow);
+        if (parsed.recycleGasPercents) setRecycleGasPercents(parsed.recycleGasPercents);
+        if (parsed.recycleGasFlow) setRecycleGasFlow(parsed.recycleGasFlow);
+        if (parsed.steamFlowTons) setSteamFlowTons(parsed.steamFlowTons);
+        if (parsed.airPercents) setAirPercents(parsed.airPercents);
+        if (parsed.processAirFlow) setProcessAirFlow(parsed.processAirFlow);
+        if (parsed.relativeHumidity) setRelativeHumidity(parsed.relativeHumidity);
+        if (parsed.ambientTemp) setAmbientTemp(parsed.ambientTemp);
+        if (parsed.designProcessGasFlow) setDesignProcessGasFlow(parsed.designProcessGasFlow);
+        if (parsed.designCarbonNumber) setDesignCarbonNumber(parsed.designCarbonNumber);
+        if (parsed.opParams) setOpParams(parsed.opParams);
+        if (parsed.params) setParams(parsed.params);
+        if (parsed.customMethanatorInlet) setCustomMethanatorInlet(parsed.customMethanatorInlet);
+        if (parsed.customReactorInlet) setCustomReactorInlet(parsed.customReactorInlet);
+      } catch (e) {
+        console.error("Failed to load saved simulation data", e);
+      }
+    }
+  }, []);
+
+  const handleSave = () => {
+    setSaveStatus('saving');
+    const dataToSave = {
+      processGasPercents, processGasFlow,
+      recycleGasPercents, recycleGasFlow,
+      steamFlowTons,
+      airPercents, processAirFlow, relativeHumidity, ambientTemp,
+      designProcessGasFlow, designCarbonNumber,
+      opParams, params,
+      customMethanatorInlet, customReactorInlet
+    };
+    localStorage.setItem('aps_simulation_data', JSON.stringify(dataToSave));
+    setTimeout(() => {
+      setSaveStatus('saved');
+      setTimeout(() => setSaveStatus('idle'), 3000);
+    }, 500);
+  };
+
+  // --- Stream Calculations ---
+  const processGasCalculated = useMemo(() => {
+    const moles: Record<ComponentKey, number> = {} as any;
+    COMPONENTS.forEach(c => {
+      const compNmc = (processGasPercents[c] / 100) * processGasFlow;
+      moles[c] = compNmc / CONVERSION_FACTOR;
+    });
+    const data = calculateStreamDerivedData(moles);
+    COMPONENTS.forEach(c => data.moleFractions[c] = processGasPercents[c] / 100);
+    return data;
+  }, [processGasPercents, processGasFlow]);
+
+  const recycleGasCalculated = useMemo(() => {
+    const moles: Record<ComponentKey, number> = {} as any;
+    COMPONENTS.forEach(c => {
+      const compNmc = (recycleGasPercents[c] / 100) * recycleGasFlow;
+      moles[c] = compNmc / CONVERSION_FACTOR;
+    });
+    const data = calculateStreamDerivedData(moles);
+    COMPONENTS.forEach(c => data.moleFractions[c] = recycleGasPercents[c] / 100);
+    return data;
+  }, [recycleGasPercents, recycleGasFlow]);
+
+  const steamDerived = useMemo(() => {
+    const kgHr = steamFlowTons * 1000;
+    const kgmolHr = kgHr / 18;
+    const nmcHr = kgmolHr * CONVERSION_FACTOR;
+    return { kgHr, kgmolHr, nmcHr };
+  }, [steamFlowTons]);
+
+  const feedGasCalculated = useMemo(() => {
+    const pg = processGasCalculated;
+    const rg = recycleGasCalculated;
+    const combinedMoles: Record<ComponentKey, number> = {} as any;
+    COMPONENTS.forEach(c => {
+      combinedMoles[c] = (pg.moles[c] || 0) + (rg.moles[c] || 0);
+    });
+    combinedMoles.H2O = (combinedMoles.H2O || 0) + steamDerived.kgmolHr;
+    return calculateStreamDerivedData(combinedMoles);
+  }, [processGasCalculated, recycleGasCalculated, steamDerived]);
+
+  const airCalculated = useMemo(() => {
+    const pSat = 6.112 * Math.exp((17.67 * ambientTemp) / (ambientTemp + 243.5));
+    const pVapor = (relativeHumidity / 100) * pSat;
+    const pAtm = 1013.25;
+    const yH2O = pVapor / pAtm;
+
+    const dryMoles: Record<ComponentKey, number> = {} as any;
+    let totalDryNmc = 0;
+    COMPONENTS.forEach(c => {
+      if (c !== 'H2O') {
+        const compNmc = (airPercents[c] / 100) * processAirFlow;
+        dryMoles[c] = compNmc / CONVERSION_FACTOR;
+        totalDryNmc += compNmc;
+      }
+    });
+
+    const dryKgmolSum = totalDryNmc / CONVERSION_FACTOR;
+    const h2oKgmol = dryKgmolSum * (yH2O / (1 - yH2O));
+    
+    const finalMoles = { ...dryMoles, H2O: h2oKgmol };
+    const data = calculateStreamDerivedData(finalMoles);
+    COMPONENTS.forEach(c => data.moleFractions[c] = c === 'H2O' ? 0 : airPercents[c] / 100);
+    return data;
+  }, [airPercents, processAirFlow, relativeHumidity, ambientTemp]);
 
   const plantData = useMemo(() => {
-    const primaryInlet = calculateStreamDerivedData(inletFeed);
-    const primaryOutletMoles = calculatePrimaryReformer(
-      inletFeed, 
-      params.primaryCh4Conv, 
-      params.primaryC2h6Conv,
-      params.primaryCoConv
-    );
-    const primaryOutlet = calculateStreamDerivedData(primaryOutletMoles);
+    const pg = processGasCalculated;
+    const rg = recycleGasCalculated;
+    const air = airCalculated;
+    
+    const combinedMoles: Record<ComponentKey, number> = {} as any;
+    COMPONENTS.forEach(c => combinedMoles[c] = (pg.moles[c] || 0) + (rg.moles[c] || 0));
+    combinedMoles.H2O = steamDerived.kgmolHr;
+    const primaryInlet = calculateStreamDerivedData(combinedMoles);
 
-    const secondaryInlet = primaryOutlet;
-    const airFeedMoles = { ...airMoles };
-    const secondaryOutletMoles = calculateSecondaryReformer(
-      secondaryInlet.moles,
-      airFeedMoles,
-      params.secondaryCh4Conv,
-      params.secondaryCoConv,
-      params.secondaryO2Conv
-    );
-    const secondaryOutlet = calculateStreamDerivedData(secondaryOutletMoles);
+    const pOutMoles = calculatePrimaryReformer(combinedMoles, params.primaryCh4Conv, params.primaryC2h6Conv, params.primaryCoConv);
+    const sOutMoles = calculateSecondaryReformer(pOutMoles, air.moles, params.secondaryCh4Conv, params.secondaryCoConv, params.secondaryO2Conv);
+    const htsOutMoles = calculateShiftConverter(sOutMoles, params.htsCoConv);
+    const ltsOutMoles = calculateShiftConverter(htsOutMoles, params.ltsCoConv);
 
-    const htsInlet = secondaryOutlet;
-    const htsOutletMoles = calculateShiftConverter(
-      htsInlet.moles,
-      params.htsCoConv
-    );
-    const htsOutlet = calculateStreamDerivedData(htsOutletMoles);
-
-    const ltsInlet = htsOutlet;
-    const ltsOutletMoles = calculateShiftConverter(
-      ltsInlet.moles,
-      params.ltsCoConv
-    );
-    const ltsOutlet = calculateStreamDerivedData(ltsOutletMoles);
-
-    const methanatorInletMolesActual = methanatorInletMoles || ltsOutletMoles;
-    const methanatorInlet = calculateStreamDerivedData(methanatorInletMolesActual);
-    const methanatorOutletMoles = calculateMethanator(
-      methanatorInletMolesActual,
-      params.methanatorCoConv,
-      params.methanatorCo2Conv
-    );
-    const methanatorOutlet = calculateStreamDerivedData(methanatorOutletMoles);
-
-    const ammoniaReactorInletMolesActual = ammoniaReactorInletMoles || methanatorOutletMoles;
-    const ammoniaReactorInlet = calculateStreamDerivedData(ammoniaReactorInletMolesActual);
-    const ammoniaReactorOutletMoles = calculateAmmoniaReactor(
-      ammoniaReactorInletMolesActual,
-      params.reactorConv
-    );
-    const ammoniaReactorOutlet = calculateStreamDerivedData(ammoniaReactorOutletMoles);
+    // Priority: Custom Methanator Inlet > Calculated LTS Outlet
+    const methInletMoles = customMethanatorInlet || ltsOutMoles;
+    const methOutMoles = calculateMethanator(methInletMoles, params.methanatorCoConv, params.methanatorCo2Conv);
+    
+    // Priority: Custom Reactor Inlet > Calculated Methanator Outlet
+    const ammInletMoles = customReactorInlet || methOutMoles;
+    const reactOutMoles = calculateAmmoniaReactor(ammInletMoles, params.reactorConv);
 
     return {
-      primary: { inlet: primaryInlet, outlet: primaryOutlet },
-      secondary: { inlet: secondaryInlet, outlet: secondaryOutlet },
-      hts: { inlet: htsInlet, outlet: htsOutlet },
-      lts: { inlet: ltsInlet, outlet: ltsOutlet },
-      methanator: { inlet: methanatorInlet, outlet: methanatorOutlet },
-      ammoniaReactor: { inlet: ammoniaReactorInlet, outlet: ammoniaReactorOutlet },
-      air: calculateStreamDerivedData(airMoles)
+      processGas: pg, recycleGas: rg, air,
+      primary: { inlet: primaryInlet, outlet: calculateStreamDerivedData(pOutMoles) },
+      secondary: { inlet: calculateStreamDerivedData(pOutMoles), outlet: calculateStreamDerivedData(sOutMoles) },
+      hts: { inlet: calculateStreamDerivedData(sOutMoles), outlet: calculateStreamDerivedData(htsOutMoles) },
+      lts: { inlet: calculateStreamDerivedData(htsOutMoles), outlet: calculateStreamDerivedData(ltsOutMoles) },
+      methanator: { inlet: calculateStreamDerivedData(methInletMoles), outlet: calculateStreamDerivedData(methOutMoles) },
+      ammoniaReactor: { inlet: calculateStreamDerivedData(ammInletMoles), outlet: calculateStreamDerivedData(reactOutMoles) }
     };
-  }, [inletFeed, airMoles, params, methanatorInletMoles, ammoniaReactorInletMoles]);
+  }, [processGasCalculated, recycleGasCalculated, airCalculated, steamDerived, params, customMethanatorInlet, customReactorInlet]);
 
-  const hnRatio = useMemo(() => {
-    const inlet = plantData.ammoniaReactor.inlet.moles;
-    if (!inlet.N2 || inlet.N2 === 0) return 0;
-    return inlet.H2 / inlet.N2;
-  }, [plantData.ammoniaReactor.inlet]);
-
-  const carbonNumber = useMemo(() => {
-    const inlet = plantData.primary.inlet;
-    const totalMoles = inlet.totalMoles;
-    const h2oMoles = inlet.moles.H2O || 0;
-    const dryTotal = totalMoles - h2oMoles;
-    if (dryTotal <= 0) return 0;
-    return (1 * (inlet.moles.CH4 || 0) + 2 * (inlet.moles.C2H6 || 0) + 1 * (inlet.moles.CO2 || 0) + 1 * (inlet.moles.CO || 0)) / dryTotal;
-  }, [plantData.primary.inlet]);
+  // --- KPI Formulas ---
+  const processGasCarbonNo = useMemo(() => {
+    const p = processGasPercents;
+    return 1 * (p.CH4 / 100) + 2 * (p.C2H6 / 100) + 1 * (p.CO2 / 100) + 1 * (p.CO / 100);
+  }, [processGasPercents]);
 
   const steamToCarbonRatio = useMemo(() => {
-    if (carbonNumber <= 0 || processGasFlow <= 0) return 0;
-    return (steamFlow * 1245.2222222) / (carbonNumber * processGasFlow);
-  }, [steamFlow, carbonNumber, processGasFlow]);
+    const p = processGasPercents;
+    const carbonNo = 1 * (p.CH4 / 100) + 2 * (p.C2H6 / 100) + 1 * (p.CO2 / 100) + 1 * (p.CO / 100);
+    if (carbonNo === 0 || processGasFlow === 0) return 0;
+    return (steamFlowTons * 1245.2222222) / (carbonNo * processGasFlow);
+  }, [steamFlowTons, processGasPercents, processGasFlow]);
 
   const frontEndLoad = useMemo(() => {
-    const designLoad = designProcessGasFlow * designCarbonNumber;
-    if (designLoad <= 0) return 0;
-    return (processGasFlow * carbonNumber) / designLoad;
-  }, [processGasFlow, carbonNumber, designProcessGasFlow, designCarbonNumber]);
+    const p = processGasPercents;
+    const carbonNo = 1 * (p.CH4 / 100) + 2 * (p.C2H6 / 100) + 1 * (p.CO2 / 100) + 1 * (p.CO / 100);
+    const denominator = designProcessGasFlow * designCarbonNumber;
+    if (denominator === 0) return 0;
+    return (carbonNo * processGasFlow) / denominator;
+  }, [processGasPercents, processGasFlow, designProcessGasFlow, designCarbonNumber]);
 
-  const handleInletEdit = (comp: ComponentKey, value: number) => {
-    setInletFeed(prev => ({ ...prev, [comp]: value }));
+  const gasToAirRatio = useMemo(() => {
+    if (processAirFlow === 0) return 0;
+    return (processGasFlow + recycleGasFlow) / processAirFlow;
+  }, [processGasFlow, recycleGasFlow, processAirFlow]);
+
+  const handleFocus = (e: React.FocusEvent<HTMLInputElement>) => e.target.select();
+
+  const updateOpParam = (unit: keyof typeof opParams, key: 'tin'|'tout'|'pin'|'pout', val: string) => {
+    setOpParams(prev => ({ ...prev, [unit]: { ...prev[unit], [key]: parseFloat(val) || 0 } }));
   };
 
-  const handleAirEdit = (comp: ComponentKey, value: number) => {
-    setAirMoles(prev => ({ ...prev, [comp]: value }));
+  const formatStreamDataForExport = (name: string, data: StreamData) => {
+    const rows = COMPONENTS.map(c => [
+      c,
+      data.moles[c].toFixed(4),
+      (data.moles[c] * CONVERSION_FACTOR).toFixed(2),
+      (data.moleFractions[c] * 100).toFixed(4),
+      ((c === 'H2O' ? 0 : (data.moles[c] / (data.totalMoles - data.moles.H2O))) * 100 || 0).toFixed(4)
+    ]);
+    return { name, rows };
   };
 
-  const handleMethanatorInletEdit = (comp: ComponentKey, value: number) => {
-    setMethanatorInletMoles(prev => {
-      const base = prev || plantData.lts.outlet.moles;
-      return { ...base, [comp]: value };
-    });
-  };
-
-  const handleAmmoniaReactorInletEdit = (comp: ComponentKey, value: number) => {
-    setAmmoniaReactorInletMoles(prev => {
-      const base = prev || plantData.methanator.outlet.moles;
-      return { ...base, [comp]: value };
-    });
-  };
-
-  const updateOpParams = (unit: keyof typeof opParams, key: keyof typeof opParams.primary, val: string) => {
-    setOpParams(prev => ({
-      ...prev,
-      [unit]: {
-        ...prev[unit],
-        [key]: parseFloat(val) || 0
-      }
-    }));
-  };
-
-  const handleFocus = (e: React.FocusEvent<HTMLInputElement>) => {
-    e.target.select();
-  };
-
-  const chartData = useMemo(() => {
-    return COMPONENTS.filter(c => !['NH3', 'O2'].includes(c) || c === 'NH3').map(comp => ({
-      name: comp,
-      'Feed': plantData.primary.inlet.moleFractions[comp] * 100,
-      'P. Ref': plantData.primary.outlet.moleFractions[comp] * 100,
-      'S. Ref': plantData.secondary.outlet.moleFractions[comp] * 100,
-      'HTS': plantData.hts.outlet.moleFractions[comp] * 100,
-      'LTS': plantData.lts.outlet.moleFractions[comp] * 100,
-      'Meth': plantData.methanator.outlet.moleFractions[comp] * 100,
-      'React': plantData.ammoniaReactor.outlet.moleFractions[comp] * 100,
-    }));
-  }, [plantData]);
-
-  const handleDownloadPDF = () => {
-    const doc = new jsPDF() as any;
-    const tabName = activeTab === 'inputs' ? 'Feed & Config' : 
-                   activeTab === 'primary' ? 'Primary Reformer' : 
-                   activeTab === 'secondary' ? 'Secondary Reformer' : 
-                   activeTab === 'hts' ? 'HTS Shift' : 
-                   activeTab === 'lts' ? 'LTS Shift' : 
-                   activeTab === 'methanator' ? 'Methanator' : 
-                   activeTab === 'ammoniaReactor' ? 'Ammonia Reactor' : 'Simulation Trends';
-    
-    doc.setFontSize(18);
-    doc.setTextColor(15, 23, 42); 
-    doc.text('Ammonia Plant', 105, 15, { align: 'center' });
-    doc.setFontSize(12);
-    doc.setTextColor(100, 116, 139); 
-    doc.text('Process Simulator (APS)', 105, 22, { align: 'center' });
-    doc.setFontSize(14);
-    doc.setTextColor(37, 99, 235); 
-    doc.text(tabName, 105, 32, { align: 'center' });
-
-    let yPos = 45;
-    const addTable = (title: string, data: StreamData, comps: ComponentKey[] = COMPONENTS) => {
-      doc.setFontSize(10);
-      doc.setTextColor(0);
-      doc.text(title, 14, yPos);
-      yPos += 5;
-      const dryTotal = data.totalMoles - (data.moles.H2O || 0);
-      const rows = comps.map(c => [
-        c,
-        data.moles[c].toFixed(4),
-        (data.moles[c] * CONVERSION_FACTOR).toFixed(2),
-        ((data.moles[c] / data.totalMoles) * 100).toFixed(4) + '%',
-        c === 'H2O' ? '-' : ((data.moles[c] / dryTotal) * 100).toFixed(4) + '%'
-      ]);
-      doc.autoTable({
-        startY: yPos,
-        head: [['Component', 'Kgmol/hr', 'NMC/hr', 'Wet mol%', 'Dry mol%']],
-        body: rows,
-        theme: 'striped',
-        headStyles: { fillColor: [31, 41, 55] },
-        styles: { fontSize: 8 },
-        margin: { left: 14, right: 14 }
-      });
-      yPos = (doc as any).lastAutoTable.finalY + 15;
-    };
-
+  const getActiveTabMetadata = () => {
+    const sections: any[] = [];
     if (activeTab === 'inputs') {
-      const kpis = [
-        ['KPI Parameter', 'Value'],
-        ['Process Gas Flow', `${processGasFlow} NMC/hr`],
-        ['Recycle Gas Flow', `${recycleGasFlow} NMC/hr`],
-        ['Steam Flow', `${steamFlow} Tons/hr`],
-        ['Feed Gas Carbon No.', carbonNumber.toFixed(4)],
-        ['S/C Ratio', steamToCarbonRatio.toFixed(4)],
-        ['Front End Load', (frontEndLoad * 100).toFixed(2) + '%']
-      ];
-      doc.autoTable({ startY: yPos, head: kpis.slice(0,1), body: kpis.slice(1), theme: 'grid' });
-      yPos = (doc as any).lastAutoTable.finalY + 10;
-      addTable('Inlet Feed Specification', plantData.primary.inlet);
-      addTable('Air Feed Specification', plantData.air, ['N2', 'O2', 'AR', 'CO2', 'H2O']);
+      sections.push({
+        title: "Operational KPI Summary",
+        headers: ["Parameter", "Value"],
+        body: [
+          ["Process Gas Carbon No.", processGasCarbonNo.toFixed(4)],
+          ["Steam to Carbon Ratio", steamToCarbonRatio.toFixed(4)],
+          ["Front End Load", `${(frontEndLoad * 100).toFixed(2)}%`],
+          ["Gas to Air Ratio", gasToAirRatio.toFixed(4)]
+        ]
+      });
+      sections.push({
+        title: "Design Basis",
+        headers: ["Basis Name", "Value", "Unit"],
+        body: [
+          ["Design Process Gas Flow", designProcessGasFlow, "NMC/hr"],
+          ["Design Carbon No.", designCarbonNumber, "-"]
+        ]
+      });
     } else {
-      const unit = activeTab as keyof typeof opParams;
-      const op = opParams[unit];
-      const opTable = [['Parameter', 'Value'], ['Inlet Temp', `${op.tin} °C`], ['Outlet Temp', `${op.tout} °C`], ['Inlet Pressure', `${op.pin} kg/cm²g`], ['Outlet Pressure', `${op.pout} kg/cm²g`]];
-      doc.autoTable({ startY: yPos, head: opTable.slice(0,1), body: opTable.slice(1), theme: 'grid' });
-      yPos = (doc as any).lastAutoTable.finalY + 10;
-      const unitData = plantData[unit as keyof typeof plantData] as any;
-      addTable('Inlet Stream', unitData.inlet);
-      addTable('Outlet Stream', unitData.outlet);
+      const unitKey = activeTab as keyof typeof opParams;
+      const op = opParams[unitKey];
+      sections.push({
+        title: "Operating Conditions",
+        headers: ["Parameter", "Inlet", "Outlet", "Δ"],
+        body: [
+          ["Temperature (°C)", op.tin, op.tout, (op.tout - op.tin).toFixed(2)],
+          ["Pressure (kg/cm²g)", op.pin, op.pout, (op.pout - op.pin).toFixed(2)]
+        ]
+      });
+
+      // Tab specific kinetics
+      const kinetics: string[][] = [];
+      if (activeTab === 'primary') {
+        kinetics.push(["CH4 Conversion (%)", (params.primaryCh4Conv * 100).toFixed(2)]);
+        kinetics.push(["CO Conversion (%)", (params.primaryCoConv * 100).toFixed(2)]);
+      } else if (activeTab === 'secondary') {
+        kinetics.push(["CH4 Conversion (%)", (params.secondaryCh4Conv * 100).toFixed(2)]);
+        kinetics.push(["CO Conversion (%)", (params.secondaryCoConv * 100).toFixed(2)]);
+        kinetics.push(["O2 Conversion (%)", (params.secondaryO2Conv * 100).toFixed(2)]);
+      } else if (activeTab === 'hts') {
+        kinetics.push(["CO Conversion (%)", (params.htsCoConv * 100).toFixed(2)]);
+      } else if (activeTab === 'lts') {
+        kinetics.push(["CO Conversion (%)", (params.ltsCoConv * 100).toFixed(2)]);
+      } else if (activeTab === 'methanator') {
+        kinetics.push(["CO Conversion (%)", (params.methanatorCoConv * 100).toFixed(2)]);
+        kinetics.push(["CO2 Conversion (%)", (params.methanatorCo2Conv * 100).toFixed(2)]);
+      } else if (activeTab === 'ammoniaReactor') {
+        kinetics.push(["H2 Conversion (%)", (params.reactorConv * 100).toFixed(2)]);
+        const ammInlet = plantData.ammoniaReactor.inlet;
+        const hnRatio = ammInlet.moles.N2 > 0 ? (ammInlet.moles.H2 / ammInlet.moles.N2) : 0;
+        kinetics.push(["HN Ratio (H2/N2)", hnRatio.toFixed(3)]);
+      }
+
+      sections.push({
+        title: "Kinetics / Performance Controls",
+        headers: ["Control Parameter", "Target Value"],
+        body: kinetics
+      });
     }
-    doc.save(`Ammonia_Plant_${tabName.replace(/\s/g, '_')}_${new Date().getTime()}.pdf`);
+    return sections;
+  };
+
+  const getActiveTabTables = () => {
+    const tables: any[] = [];
+    if (activeTab === 'inputs') {
+      tables.push(formatStreamDataForExport("1. Process Gas Specification (Dry)", plantData.processGas));
+      tables.push(formatStreamDataForExport("2. Recycle Gas Specification (Dry)", plantData.recycleGas));
+      tables.push(formatStreamDataForExport("4. Feed Gas Specification (Combined Feed)", feedGasCalculated));
+      tables.push(formatStreamDataForExport("5. Air Feed Specification", plantData.air));
+    } else {
+      const unit = activeTab as keyof typeof plantData;
+      if (plantData[unit] && 'inlet' in plantData[unit]) {
+        tables.push(formatStreamDataForExport(`${currentTabLabel} Inlet`, (plantData[unit] as any).inlet));
+        tables.push(formatStreamDataForExport(`${currentTabLabel} Outlet`, (plantData[unit] as any).outlet));
+      }
+    }
+    return tables;
   };
 
   const handleDownloadExcel = () => {
+    const timestamp = new Date().toLocaleString();
     const wb = XLSX.utils.book_new();
-    const tabName = activeTab === 'inputs' ? 'Feed & Config' : 
-                   activeTab === 'primary' ? 'Primary Reformer' : 
-                   activeTab === 'secondary' ? 'Secondary Reformer' : 
-                   activeTab === 'hts' ? 'HTS Shift' : 
-                   activeTab === 'lts' ? 'LTS Shift' : 
-                   activeTab === 'methanator' ? 'Methanator' : 
-                   activeTab === 'ammoniaReactor' ? 'Ammonia Reactor' : 'Simulation Trends';
     
-    let content: any[][] = [['Ammonia Plant'], ['Process Simulator (APS)'], [`Tab: ${tabName}`], []];
-    const streamToRows = (title: string, data: StreamData, comps: ComponentKey[] = COMPONENTS) => {
-      const dryTotal = data.totalMoles - (data.moles.H2O || 0);
-      return [[title], ['Component', 'Kgmol/hr', 'NMC/hr', 'Wet mol%', 'Dry mol%'], ...comps.map(c => [c, data.moles[c], data.moles[c] * CONVERSION_FACTOR, (data.moles[c] / data.totalMoles) * 100, c === 'H2O' ? 0 : (data.moles[c] / dryTotal) * 100]), ['Total Sum', data.totalMoles, data.totalVolume, 100, 100], []];
-    };
+    // Header Info
+    const headerData = [
+      ["Ammonia Plant"],
+      ["Process Simulator (APS)"],
+      [`Tab: ${currentTabLabel}`],
+      [`Downloaded At: ${timestamp}`],
+      []
+    ];
 
-    if (activeTab !== 'inputs' && activeTab !== 'charts') {
-      const unit = activeTab as keyof typeof opParams;
-      const op = opParams[unit];
-      content.push(['Equipment Parameters'], ['Parameter', 'Value', 'Unit'], ['Inlet Temp', op.tin, '°C'], ['Outlet Temp', op.tout, '°C'], ['Inlet Pressure', op.pin, 'kg/cm2.g'], ['Outlet Pressure', op.pout, 'kg/cm2.g'], [], ...streamToRows('Inlet Stream', (plantData[unit as keyof typeof plantData] as any).inlet), ...streamToRows('Outlet Stream', (plantData[unit as keyof typeof plantData] as any).outlet));
-    }
+    const allData: any[] = [...headerData];
 
-    const ws = XLSX.utils.aoa_to_sheet(content);
-    XLSX.utils.book_append_sheet(wb, ws, tabName.substring(0, 31));
-    XLSX.writeFile(wb, `Ammonia_Plant_${tabName.replace(/\s/g, '_')}_${new Date().getTime()}.xlsx`);
+    // Meta Data Sections (Op Conditions, Kinetics)
+    const metaSections = getActiveTabMetadata();
+    metaSections.forEach(sec => {
+      allData.push([sec.title.toUpperCase()]);
+      allData.push(sec.headers);
+      sec.body.forEach((row: any) => allData.push(row));
+      allData.push([]);
+    });
+
+    // Stream Tables
+    const tables = getActiveTabTables();
+    tables.forEach(table => {
+      allData.push([table.name.toUpperCase()]);
+      allData.push(["Component", "Kgmol/hr", "NMC/hr", "Wet mol%", "Dry mol%"]);
+      table.rows.forEach((row: any) => allData.push(row));
+      allData.push([]);
+    });
+
+    const ws = XLSX.utils.aoa_to_sheet(allData);
+    XLSX.utils.book_append_sheet(wb, ws, "Material Balance");
+    XLSX.writeFile(wb, `Ammonia_Plant_APS_${activeTab.toUpperCase()}.xlsx`);
   };
 
-  const renderOpControlRow = (unit: keyof typeof opParams) => {
-    const data = opParams[unit];
-    const deltaT = data.tout - data.tin;
-    const deltaP = data.pout - data.pin;
+  const handleDownloadPDF = () => {
+    const doc = new jsPDF();
+    const timestamp = new Date().toLocaleString();
+    
+    // Title & Metadata
+    doc.setFontSize(22);
+    doc.setTextColor(15, 23, 42); 
+    doc.text('Ammonia Plant', 14, 20);
+    
+    doc.setFontSize(12);
+    doc.setTextColor(100, 116, 139); 
+    doc.text('Process Simulator (APS)', 14, 28);
+    
+    doc.setFontSize(10);
+    doc.setTextColor(0, 0, 0);
+    doc.text(`Tab: ${currentTabLabel}`, 14, 38);
+    doc.text(`Downloaded At: ${timestamp}`, 14, 44);
+
+    let lastY = 50;
+
+    // Operational Meta Sections
+    const metaSections = getActiveTabMetadata();
+    metaSections.forEach(sec => {
+      doc.setFontSize(10);
+      doc.setFont('helvetica', 'bold');
+      doc.text(sec.title.toUpperCase(), 14, lastY + 5);
+      autoTable(doc, {
+        startY: lastY + 8,
+        head: [sec.headers],
+        body: sec.body,
+        theme: 'striped',
+        headStyles: { fillColor: [30, 41, 59] },
+        styles: { fontSize: 8 }
+      });
+      lastY = (doc as any).lastAutoTable.finalY + 5;
+    });
+
+    // Stream Data Tables
+    const tables = getActiveTabTables();
+    tables.forEach(table => {
+      // Check for page overflow
+      if (lastY > 240) {
+        doc.addPage();
+        lastY = 20;
+      }
+      doc.setFontSize(10);
+      doc.setFont('helvetica', 'bold');
+      doc.text(table.name.toUpperCase(), 14, lastY + 5);
+      autoTable(doc, {
+        startY: lastY + 8,
+        head: [['Component', 'Kgmol/hr', 'NMC/hr', 'Wet mol%', 'Dry mol%']],
+        body: table.rows,
+        theme: 'grid',
+        headStyles: { fillColor: [51, 65, 85] },
+        styles: { fontSize: 8 }
+      });
+      lastY = (doc as any).lastAutoTable.finalY + 5;
+    });
+
+    doc.save(`Ammonia_Plant_APS_${activeTab.toUpperCase()}.pdf`);
+  };
+
+  const handleMethanatorInletEdit = (comp: ComponentKey, value: number) => {
+    const currentInlet = customMethanatorInlet || plantData.methanator.inlet.moles;
+    setCustomMethanatorInlet({ ...currentInlet, [comp]: value });
+  };
+
+  const handleReactorInletEdit = (comp: ComponentKey, value: number) => {
+    // Start with existing calculated or existing override
+    const currentInlet = customReactorInlet || plantData.ammoniaReactor.inlet.moles;
+    setCustomReactorInlet({ ...currentInlet, [comp]: value });
+  };
+
+  const renderOpTable = (unitKey: keyof typeof opParams) => {
+    const p = opParams[unitKey];
+    const dt = p.tout - p.tin;
+    const dp = p.pout - p.pin; // ΔP = Pout - Pin (matches image logic)
+    
+    const cardClass = "flex flex-col flex-1 min-w-[150px] p-3 rounded-lg border border-slate-200 bg-slate-50 shadow-sm items-center";
+    const labelClass = "text-[9px] font-bold text-slate-500 uppercase mb-2 tracking-tight text-center";
+    const inputContainerClass = "bg-white border border-slate-200 rounded p-1.5 flex items-center justify-center h-10 w-full";
+    const valueClass = "text-sm font-bold font-mono text-slate-800 focus:outline-none w-full text-center bg-transparent";
+
     return (
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mt-6 pt-6 border-t border-gray-100">
-        <div className="bg-slate-50 p-3 rounded border border-slate-100 shadow-sm"><label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Inlet Temp (°C)</label><input type="number" step="any" onFocus={handleFocus} value={data.tin === 0 ? "0" : data.tin} onChange={e => updateOpParams(unit, 'tin', e.target.value)} className="w-full border border-slate-200 rounded p-1 font-mono text-sm text-slate-800 outline-none focus:ring-1 focus:ring-blue-400"/></div>
-        <div className="bg-slate-50 p-3 rounded border border-slate-100 shadow-sm"><label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Outlet Temp (°C)</label><input type="number" step="any" onFocus={handleFocus} value={data.tout === 0 ? "0" : data.tout} onChange={e => updateOpParams(unit, 'tout', e.target.value)} className="w-full border border-slate-200 rounded p-1 font-mono text-sm text-slate-800 outline-none focus:ring-1 focus:ring-blue-400"/></div>
-        <div className="bg-slate-50 p-3 rounded border border-slate-100 shadow-sm"><label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Inlet Pres (kg/cm²g)</label><input type="number" step="any" onFocus={handleFocus} value={data.pin === 0 ? "0" : data.pin} onChange={e => updateOpParams(unit, 'pin', e.target.value)} className="w-full border border-slate-200 rounded p-1 font-mono text-sm text-slate-800 outline-none focus:ring-1 focus:ring-blue-400"/></div>
-        <div className="bg-slate-50 p-3 rounded border border-slate-100 shadow-sm"><label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Outlet Pres (kg/cm²g)</label><input type="number" step="any" onFocus={handleFocus} value={data.pout === 0 ? "0" : data.pout} onChange={e => updateOpParams(unit, 'pout', e.target.value)} className="w-full border border-slate-200 rounded p-1 font-mono text-sm text-slate-800 outline-none focus:ring-1 focus:ring-blue-400"/></div>
-        <div className="bg-emerald-50 p-3 rounded border border-emerald-200 shadow-sm"><label className="block text-[10px] font-bold text-emerald-600 uppercase tracking-wider mb-1">ΔT (°C)</label><div className="w-full bg-white border border-emerald-100 rounded p-1 font-mono text-sm font-bold text-emerald-700 text-center">{deltaT.toFixed(2)}</div></div>
-        <div className="bg-orange-50 p-3 rounded border border-orange-200 shadow-sm"><label className="block text-[10px] font-bold text-orange-600 uppercase tracking-wider mb-1">ΔP (kg/cm²)</label><div className="w-full bg-white border border-orange-100 rounded p-1 font-mono text-sm font-bold text-orange-700 text-center">{deltaP.toFixed(3)}</div></div>
+      <div className="mb-8">
+        <h3 className="text-lg font-bold text-gray-800 mb-4 flex items-center">
+          <i className="fas fa-gauge-high mr-2 text-blue-500"></i> Operating Conditions
+        </h3>
+        <div className="flex flex-wrap gap-3">
+          {/* Inlet Temp */}
+          <div className={cardClass}>
+            <span className={labelClass}>INLET TEMP (°C)</span>
+            <div className={inputContainerClass}>
+              <input 
+                type="number" 
+                onFocus={handleFocus} 
+                value={p.tin} 
+                onChange={e => updateOpParam(unitKey, 'tin', e.target.value)} 
+                className={valueClass}
+              />
+            </div>
+          </div>
+
+          {/* Outlet Temp */}
+          <div className={cardClass}>
+            <span className={labelClass}>OUTLET TEMP (°C)</span>
+            <div className={inputContainerClass}>
+              <input 
+                type="number" 
+                onFocus={handleFocus} 
+                value={p.tout} 
+                onChange={e => updateOpParam(unitKey, 'tout', e.target.value)} 
+                className={valueClass}
+              />
+            </div>
+          </div>
+
+          {/* Inlet Pres */}
+          <div className={cardClass}>
+            <span className={labelClass}>INLET PRES (KG/CM²G)</span>
+            <div className={inputContainerClass}>
+              <input 
+                type="number" 
+                onFocus={handleFocus} 
+                value={p.pin} 
+                onChange={e => updateOpParam(unitKey, 'pin', e.target.value)} 
+                className={valueClass}
+              />
+            </div>
+          </div>
+
+          {/* Outlet Pres */}
+          <div className={cardClass}>
+            <span className={labelClass}>OUTLET PRES (KG/CM²G)</span>
+            <div className={inputContainerClass}>
+              <input 
+                type="number" 
+                onFocus={handleFocus} 
+                value={p.pout} 
+                onChange={e => updateOpParam(unitKey, 'pout', e.target.value)} 
+                className={valueClass}
+              />
+            </div>
+          </div>
+
+          {/* Delta T */}
+          <div className="flex flex-col flex-1 min-w-[150px] p-3 rounded-lg border border-green-200 bg-green-50 shadow-sm items-center">
+            <span className={`${labelClass} text-green-700`}>ΔT (°C)</span>
+            <div className="bg-white border border-green-100 rounded p-1.5 flex items-center justify-center h-10 w-full">
+              <span className="text-sm font-bold font-mono text-green-700 text-center">{dt.toFixed(2)}</span>
+            </div>
+          </div>
+
+          {/* Delta P */}
+          <div className="flex flex-col flex-1 min-w-[150px] p-3 rounded-lg border border-orange-200 bg-orange-50 shadow-sm items-center">
+            <span className={`${labelClass} text-orange-700`}>ΔP (KG/CM²)</span>
+            <div className="bg-white border border-orange-100 rounded p-1.5 flex items-center justify-center h-10 w-full">
+              <span className="text-sm font-bold font-mono text-orange-700 text-center">{dp.toFixed(2)}</span>
+            </div>
+          </div>
+        </div>
       </div>
     );
   };
 
-  const renderDownloadButtons = () => (
-    <div className="flex flex-wrap gap-4 mt-12 pt-8 border-t border-gray-200 justify-center">
-      <button onClick={handleDownloadPDF} className="flex items-center space-x-2 bg-red-600 hover:bg-red-700 text-white px-6 py-3 rounded-lg font-bold shadow-lg transition-all active:scale-95"><i className="fas fa-file-pdf"></i><span>Download in PDF</span></button>
-      <button onClick={handleDownloadExcel} className="flex items-center space-x-2 bg-emerald-600 hover:bg-emerald-700 text-white px-6 py-3 rounded-lg font-bold shadow-lg transition-all active:scale-95"><i className="fas fa-file-excel"></i><span>Download in Excel</span></button>
-    </div>
-  );
-
   if (showLanding) {
     return (
-      <div className="min-h-screen w-full flex items-center justify-center bg-gradient-to-br from-slate-950 via-slate-900 to-emerald-950 font-sans text-white relative overflow-hidden">
-        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-emerald-500/10 rounded-full blur-[120px] animate-pulse"></div>
-        <div className="absolute bottom-[-10%] right-[-10%] w-[50%] h-[50%] bg-blue-500/10 rounded-full blur-[150px] animate-pulse" style={{ animationDelay: '2s' }}></div>
-        
-        <div className="max-w-4xl px-8 text-center relative z-10 animate-fadeInUp flex flex-col items-center">
-          <div className="mb-8 inline-flex items-center justify-center w-24 h-24 bg-emerald-500/10 rounded-3xl border border-emerald-500/20 shadow-2xl backdrop-blur-md">
-            <i className="fas fa-industry text-5xl text-emerald-400"></i>
+      <div className="fixed inset-0 z-[200] flex flex-col items-center justify-center bg-slate-900 text-white overflow-hidden">
+        {/* Animated Background Elements */}
+        <div className="absolute top-0 left-0 w-full h-full opacity-10 pointer-events-none">
+          <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] rounded-full bg-blue-500 blur-[120px] animate-pulse"></div>
+          <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] rounded-full bg-emerald-500 blur-[120px] animate-pulse"></div>
+        </div>
+
+        <div className="z-10 text-center px-6 max-w-4xl flex flex-col items-center">
+          <div className="mb-8 inline-flex items-center justify-center p-4 rounded-3xl bg-slate-800/50 border border-slate-700 backdrop-blur-md shadow-2xl">
+            <i className="fas fa-industry text-6xl text-emerald-400"></i>
           </div>
-          <div className="space-y-2 mb-12">
-            <h1 className="text-6xl md:text-8xl font-black tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-white via-slate-100 to-emerald-200">
+          
+          <div className="mb-12 flex flex-col items-center">
+            <h1 className="text-7xl md:text-9xl font-extrabold tracking-tight drop-shadow-lg leading-none mb-2">
               Ammonia
             </h1>
-            <h2 className="text-2xl md:text-4xl font-bold tracking-tight text-emerald-400/90">
+            <h2 className="text-2xl md:text-4xl font-bold tracking-widest text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-emerald-400 uppercase">
               Process Simulator (APS)
             </h2>
           </div>
+
           <button 
             onClick={() => setShowLanding(false)}
-            className="group relative inline-flex items-center justify-center px-12 py-5 font-bold text-white transition-all duration-300 bg-emerald-600 rounded-2xl hover:bg-emerald-500 shadow-[0_0_40px_-10px_rgba(16,185,129,0.5)] active:scale-95 border border-emerald-400/20"
+            className="group relative inline-flex items-center justify-center px-12 py-5 font-bold text-white transition-all duration-200 bg-emerald-600 rounded-2xl hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-emerald-600 shadow-xl"
           >
-            <span className="text-2xl">Let’s Begin</span>
+            <span className="relative flex items-center text-xl uppercase tracking-widest">
+              Let’s Begin
+            </span>
           </button>
         </div>
-
-        <style>{`
-          @keyframes fadeInUp {
-            from { opacity: 0; transform: translateY(40px); }
-            to { opacity: 1; transform: translateY(0); }
-          }
-          .animate-fadeInUp {
-            animation: fadeInUp 1s cubic-bezier(0.16, 1, 0.3, 1);
-          }
-        `}</style>
       </div>
     );
   }
@@ -385,426 +608,412 @@ const App: React.FC = () => {
             <i className="fas fa-industry text-2xl text-emerald-400"></i>
             <div>
               <h1 className="text-xl font-bold tracking-tight">Ammonia Plant</h1>
-              <p className="text-xs text-slate-400 uppercase tracking-widest font-semibold">Process Simulator (APS)</p>
+              <p className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">Process Simulator (APS)</p>
             </div>
           </div>
-          <button 
-            onClick={() => setIsAboutOpen(true)}
-            aria-label="About Ammonia-APS"
-            className="flex items-center justify-center bg-slate-800 hover:bg-slate-700 text-white w-10 h-10 sm:w-auto sm:px-4 sm:h-10 rounded-full sm:rounded-lg transition-all border border-slate-700 shadow-sm"
-          >
-            <i className="fas fa-info-circle text-emerald-400 text-lg"></i>
-            <span className="hidden sm:inline ml-2 text-sm font-bold uppercase tracking-wide">About</span>
-          </button>
+          <div className="flex items-center space-x-2">
+            <button 
+              onClick={handleSave} 
+              className={`px-3 h-9 rounded text-xs font-bold uppercase transition-all border flex items-center space-x-2 ${
+                saveStatus === 'saved' ? 'bg-emerald-600 border-emerald-500 text-white' : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-white'
+              }`}
+            >
+              <i className={`fas ${saveStatus === 'saving' ? 'fa-spinner fa-spin' : (saveStatus === 'saved' ? 'fa-check' : 'fa-save')} text-emerald-400`}></i>
+              <span className="hidden sm:inline">{saveStatus === 'saved' ? 'Saved' : 'Save'}</span>
+            </button>
+            <button onClick={() => setIsAboutOpen(true)} className="bg-slate-800 hover:bg-slate-700 text-white px-3 h-9 rounded text-xs font-bold uppercase transition-all border border-slate-700">
+              <i className="fas fa-info-circle text-emerald-400"></i>
+            </button>
+          </div>
         </div>
       </header>
 
-      {/* About Modal */}
       {isAboutOpen && (
-        <div 
-          className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fadeIn"
-          onClick={() => setIsAboutOpen(false)}
-        >
-          <div 
-            className="bg-white rounded-xl shadow-2xl max-w-2xl w-full overflow-hidden flex flex-col max-h-[90vh] animate-scaleUp font-sans"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="bg-slate-800 p-4 text-white flex justify-between items-center flex-shrink-0">
-              <div className="flex items-center space-x-3">
-                <i className="fas fa-info-circle text-emerald-400"></i>
-                <h2 className="text-lg font-bold">About Ammonia-APS</h2>
-              </div>
-              <button 
-                onClick={() => setIsAboutOpen(false)}
-                className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-700 transition-colors"
-              >
-                <i className="fas fa-times"></i>
-              </button>
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm" onClick={() => setIsAboutOpen(false)}>
+          <div className="bg-white rounded-xl shadow-2xl max-w-3xl w-full p-8 max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <h2 className="text-2xl font-bold mb-6 text-slate-800 flex items-center">
+              <i className="fas fa-circle-info mr-3 text-blue-500"></i>
+              Ammonia Process Simulator (APS)
+            </h2>
+            <div className="text-gray-700 space-y-4 leading-relaxed text-sm md:text-base">
+              <p>
+                <strong>Ammonia Process Simulator (APS)</strong> is an interactive engineering tool designed to perform detailed material balance calculations across an entire ammonia plant.
+              </p>
+              <p>
+                The simulator allows users to define feed compositions, operating conditions, and conversion parameters, and instantly visualize their impact across major process units including reformers, shift converters, methanator, and ammonia reactor. Both wet and dry mole fractions, mass and volumetric flows, and key performance indicators such as Carbon Number, Steam-to-Carbon ratio, Front End Load, ΔT, ΔP, and H/N ratio are calculated dynamically.
+              </p>
+              <p>
+                Built with a strong focus on process fundamentals, transparency of calculations, and engineering accuracy, this app serves as a powerful learning, analysis, and what-if simulation platform for operation and practicing process engineers working in ammonia and syngas plants.
+              </p>
             </div>
             
-            <div className="p-6 md:p-8 overflow-y-auto space-y-6 text-slate-600 leading-relaxed text-sm md:text-base border-b border-slate-100 bg-white">
-              <div className="space-y-4">
-                <p className="font-semibold text-slate-900 border-l-4 border-emerald-500 pl-4 bg-slate-50 py-2 rounded">
-                  Ammonia Process Simulator (APS) is an interactive engineering tool designed to perform detailed material balance calculations across an entire ammonia plant.
-                </p>
-                <p>
-                  The simulator allows users to define feed compositions, operating conditions, and conversion parameters, and instantly visualize their impact across major process units including reformers, shift converters, methanator, and ammonia reactor. Both wet and dry mole fractions, mass and volumetric flows, and key performance indicators such as Carbon Number, Steam-to-Carbon ratio, Front End Load, ΔT, ΔP, and H/N ratio are calculated dynamically.
-                </p>
-                <p>
-                  Built with a strong focus on process fundamentals, transparency of calculations, and engineering accuracy, this app serves as a powerful learning, analysis, and what-if simulation platform for operation and practicing process engineers working in ammonia and syngas plants.
-                </p>
+            <div className="mt-8 pt-6 border-t border-gray-100 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+              <div>
+                <p className="text-xs uppercase font-bold text-slate-400 tracking-wider mb-1">Developed By</p>
+                <p className="text-lg font-bold text-slate-800">Muhammad Ans</p>
+                <p className="text-sm font-semibold text-blue-600">Process & Control Engineer</p>
               </div>
-            </div>
-
-            <div className="flex-shrink-0 bg-slate-50 p-6 space-y-4 border-t border-slate-100">
-              <div className="flex flex-col items-center">
-                <span className="text-[10px] uppercase tracking-[0.2em] font-black text-slate-400 mb-2">Developed By</span>
-                <div className="text-center">
-                  <h3 className="text-xl font-bold text-slate-900">Muhammad Ans</h3>
-                  <div className="flex items-center justify-center mt-0.5 space-x-2">
-                    <span className="h-px w-3 bg-emerald-400"></span>
-                    <span className="text-emerald-600 font-bold text-xs tracking-wide uppercase">Process & Control Engineer</span>
-                    <span className="h-px w-3 bg-emerald-400"></span>
-                  </div>
-                </div>
-              </div>
-              <div className="flex justify-end pt-2">
-                <button 
-                  onClick={() => setIsAboutOpen(false)}
-                  className="bg-slate-800 text-white px-10 py-2.5 rounded-lg font-bold hover:bg-slate-700 transition-all shadow-md active:scale-95"
-                >
-                  Close
-                </button>
-              </div>
+              <button 
+                onClick={() => setIsAboutOpen(false)} 
+                className="bg-slate-900 hover:bg-slate-800 text-white px-8 py-2 rounded-lg font-bold transition-colors shadow-md self-end md:self-center"
+              >
+                Close
+              </button>
             </div>
           </div>
         </div>
       )}
 
       <main className="flex-1 container mx-auto p-4 md:p-6 lg:p-8">
-        <div className="flex flex-wrap border-b border-gray-200 mb-6 gap-1 bg-white p-1 rounded-t-lg shadow-sm">
-          {[
-            { id: 'inputs', label: 'Feed & Config', icon: 'fa-vials' },
-            { id: 'primary', label: 'Primary Reformer', icon: 'fa-fire-alt' },
-            { id: 'secondary', label: 'Secondary Reformer', icon: 'fa-wind' },
-            { id: 'hts', label: 'HTS Shift', icon: 'fa-angle-double-up' },
-            { id: 'lts', label: 'LTS Shift', icon: 'fa-angle-double-down' },
-            { id: 'methanator', label: 'Methanator', icon: 'fa-flask-vial' },
-            { id: 'ammoniaReactor', label: 'Ammonia Reactor', icon: 'fa-vial-circle-check' },
-            { id: 'charts', label: 'Simulation Trends', icon: 'fa-chart-line' },
-            { id: 'external-insights', label: 'Ammonia Insights', icon: 'fa-external-link-alt', isExternal: true }
-          ].map(tab => (
-            <button
-              key={tab.id}
-              onClick={() => {
-                if ((tab as any).isExternal) {
-                  window.open('https://ammonia-insights.vercel.app/', '_blank');
-                } else {
-                  setActiveTab(tab.id as any);
-                }
-              }}
-              className={`flex items-center space-x-2 px-6 py-3 text-sm font-semibold transition-all rounded-md ${
-                activeTab === tab.id ? 'bg-blue-600 text-white shadow-md transform scale-105' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700'
-              }`}
-            >
-              <i className={`fas ${tab.icon}`}></i>
-              <span>{tab.label}</span>
-            </button>
-          ))}
+        {/* Sticky Tab Navigation */}
+        <div className="sticky top-[73px] z-40 bg-gray-50/95 backdrop-blur-sm pb-4 -mx-4 px-4">
+          <div className="flex flex-wrap border-b border-gray-200 gap-1 bg-white p-1 rounded-lg shadow-sm">
+            {tabs.map(tab => (
+              <button 
+                key={tab.id} 
+                onClick={() => {
+                  if (tab.id === 'external_insights') {
+                    window.open('https://ammonia-insights.vercel.app/', '_blank');
+                  } else {
+                    setActiveTab(tab.id);
+                  }
+                }} 
+                className={`flex items-center space-x-2 px-6 py-3 text-sm font-semibold transition-all rounded-md ${activeTab === tab.id ? 'bg-blue-600 text-white shadow-md' : 'text-gray-500 hover:bg-gray-100'}`}
+              >
+                <i className={`fas ${tab.icon}`}></i><span>{tab.label}</span>
+              </button>
+            ))}
+          </div>
         </div>
 
-        <div className="animate-fadeIn">
+        <div className="space-y-12">
           {activeTab === 'inputs' && (
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-              <div className="lg:col-span-8 space-y-8">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                  <div className="bg-white p-6 rounded-lg border border-slate-200 shadow-sm border-l-4 border-l-slate-700">
-                    <div className="flex items-center space-x-3 border-b border-gray-100 pb-3 mb-6">
-                      <div className="bg-slate-100 p-2 rounded-full"><i className="fas fa-gas-pump text-slate-600"></i></div>
-                      <h3 className="text-lg font-bold text-gray-800">Current Feed Rates</h3>
+            <>
+              {/* Top Section: Basis and KPIs (Non-sticky) */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-12">
+                {/* Plant Design Basis */}
+                <div className="bg-white rounded-xl shadow-md border border-slate-200 overflow-hidden h-full flex flex-col">
+                  <div className="bg-slate-800 text-white px-5 py-4 flex items-center justify-between">
+                    <h3 className="font-bold text-sm uppercase tracking-wider">Plant Design Basis</h3>
+                    <i className="fas fa-drafting-compass text-blue-400"></i>
+                  </div>
+                  <div className="p-6 space-y-6 flex-1 bg-slate-50/50">
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-500 mb-2 uppercase tracking-wide">Design Process Gas Flow (NMC/hr)</label>
+                      <input 
+                        type="number" 
+                        step="any" 
+                        onFocus={handleFocus} 
+                        value={designProcessGasFlow} 
+                        onChange={e => setDesignProcessGasFlow(parseFloat(e.target.value) || 0)} 
+                        className="w-full border border-slate-200 rounded-lg p-3 font-mono text-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white text-center shadow-inner"
+                      />
                     </div>
-                    <div className="space-y-4">
-                      <div className="bg-slate-50 p-4 rounded-lg border border-slate-100">
-                        <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider">Process Gas Flow</label>
-                        <div className="relative mt-2">
-                          <input type="number" step="any" onFocus={handleFocus} value={processGasFlow === 0 ? "0" : processGasFlow} onChange={e => setProcessGasFlow(parseFloat(e.target.value) || 0)} className="w-full border border-slate-200 rounded-md p-2 pr-16 font-mono text-lg text-slate-800 focus:ring-2 focus:ring-slate-500 outline-none bg-white shadow-inner"/>
-                          <span className="absolute right-3 top-2.5 text-[10px] font-bold text-slate-400">NMC/hr</span>
-                        </div>
-                      </div>
-                      <div className="bg-slate-50 p-4 rounded-lg border border-slate-100">
-                        <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider">Recycle Gas Flow</label>
-                        <div className="relative mt-2">
-                          <input type="number" step="any" onFocus={handleFocus} value={recycleGasFlow === 0 ? "0" : recycleGasFlow} onChange={e => setRecycleGasFlow(parseFloat(e.target.value) || 0)} className="w-full border border-slate-200 rounded-md p-2 pr-16 font-mono text-lg text-slate-800 focus:ring-2 focus:ring-slate-500 outline-none bg-white shadow-inner"/>
-                          <span className="absolute right-3 top-2.5 text-[10px] font-bold text-slate-400">NMC/hr</span>
-                        </div>
-                      </div>
-                      <div className="bg-slate-50 p-4 rounded-lg border border-slate-100">
-                        <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider">Steam Flow Rate</label>
-                        <div className="relative mt-2">
-                          <input type="number" step="any" onFocus={handleFocus} value={steamFlow === 0 ? "0" : steamFlow} onChange={e => setSteamFlow(parseFloat(e.target.value) || 0)} className="w-full border border-slate-200 rounded-md p-2 pr-16 font-mono text-lg text-slate-800 focus:ring-2 focus:ring-slate-500 outline-none bg-white shadow-inner"/>
-                          <span className="absolute right-3 top-2.5 text-[10px] font-bold text-slate-400">Tons/hr</span>
-                        </div>
-                      </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-500 mb-2 uppercase tracking-wide">Design Carbon No.</label>
+                      <input 
+                        type="number" 
+                        step="any" 
+                        onFocus={handleFocus} 
+                        value={designCarbonNumber} 
+                        onChange={e => setDesignCarbonNumber(parseFloat(e.target.value) || 0)} 
+                        className="w-full border border-slate-200 rounded-lg p-3 font-mono text-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white text-center shadow-inner"
+                      />
+                    </div>
+                    <div className="pt-2 text-center">
+                      <p className="text-[10px] text-slate-400 font-semibold italic">Adjust these values to calibrate plant load and KPI metrics.</p>
                     </div>
                   </div>
+                </div>
 
-                  <div className="bg-white p-6 rounded-lg border border-indigo-200 shadow-sm border-l-4 border-l-indigo-700">
-                    <div className="flex items-center space-x-3 border-b border-gray-100 pb-3 mb-6">
-                      <div className="bg-indigo-100 p-2 rounded-full"><i className="fas fa-drafting-compass text-indigo-600"></i></div>
-                      <h3 className="text-lg font-bold text-gray-800">Plant Design Basis</h3>
-                    </div>
-                    <div className="space-y-4">
-                      <div className="bg-indigo-50 p-4 rounded-lg border border-indigo-100">
-                        <label className="block text-[10px] font-bold text-indigo-500 uppercase tracking-wider">Design Process Gas Flow</label>
-                        <div className="relative mt-2">
-                          <input type="number" step="any" onFocus={handleFocus} value={designProcessGasFlow === 0 ? "0" : designProcessGasFlow} onChange={e => setDesignProcessGasFlow(parseFloat(e.target.value) || 0)} className="w-full border border-indigo-200 rounded-md p-2 pr-16 font-mono text-lg text-indigo-800 focus:ring-2 focus:ring-indigo-500 outline-none bg-white shadow-inner"/>
-                          <span className="absolute right-3 top-2.5 text-[10px] font-bold text-indigo-400">NMC/hr</span>
-                        </div>
-                      </div>
-                      <div className="bg-indigo-50 p-4 rounded-lg border border-indigo-100">
-                        <label className="block text-[10px] font-bold text-indigo-500 uppercase tracking-wider">Design Carbon No.</label>
-                        <div className="relative mt-2">
-                          <input type="number" step="any" onFocus={handleFocus} value={designCarbonNumber === 0 ? "0" : designCarbonNumber} onChange={e => setDesignCarbonNumber(parseFloat(e.target.value) || 0)} className="w-full border border-indigo-200 rounded-md p-2 font-mono text-lg text-indigo-800 focus:ring-2 focus:ring-indigo-500 outline-none bg-white shadow-inner"/>
-                        </div>
-                      </div>
-                    </div>
+                {/* Operational KPI Summary */}
+                <div className="bg-white rounded-xl shadow-md border border-slate-200 overflow-hidden h-full flex flex-col">
+                  <div className="bg-slate-800 text-white px-5 py-4 flex items-center justify-between">
+                    <h3 className="font-bold text-sm uppercase tracking-wider">Operational KPI Summary</h3>
+                    <i className="fas fa-tachometer-alt text-emerald-400"></i>
                   </div>
-                </div>
-                <StreamTable title="Inlet Feed Specification" data={plantData.primary.inlet} isEditable onEdit={handleInletEdit} />
-                <StreamTable title="Air Feed Specification (Secondary Reformer)" data={plantData.air} isEditable onEdit={handleAirEdit} componentsToShow={['N2', 'O2', 'AR', 'CO2', 'H2O']} />
-                {renderDownloadButtons()}
-              </div>
-              <div className="lg:col-span-4 space-y-6">
-                <div className="bg-white rounded-lg shadow-md border border-slate-200 overflow-hidden">
-                  <div className="bg-slate-800 text-white px-5 py-4">
-                    <div className="flex items-center space-x-2"><i className="fas fa-chart-line text-emerald-400"></i><h3 className="font-bold text-sm uppercase tracking-wider">Operational KPI Summary</h3></div>
-                  </div>
-                  <div className="p-0 divide-y divide-slate-100">
-                    <div className="px-6 py-5 flex items-center justify-between hover:bg-slate-50 transition-colors">
-                      <div className="flex items-center space-x-3"><div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600"><i className="fas fa-atom text-xs"></i></div><span className="text-xs font-semibold text-slate-500 uppercase tracking-tight">Feed Gas Carbon No.</span></div>
-                      <span className="text-2xl font-bold font-mono text-blue-700">{carbonNumber.toFixed(4)}</span>
+                  <div className="grid grid-cols-2 divide-x divide-y divide-slate-100 flex-1">
+                    <div className="px-4 py-6 flex flex-col items-center justify-center hover:bg-slate-50 transition-colors">
+                      <span className="text-[10px] font-bold text-slate-500 uppercase mb-2 flex items-center">
+                        <i className="fas fa-atom mr-1.5 text-slate-400"></i> PG Carbon No.
+                      </span>
+                      <span className="text-xl font-bold font-mono text-slate-700">{processGasCarbonNo.toFixed(4)}</span>
                     </div>
-                    <div className="px-6 py-5 flex items-center justify-between hover:bg-slate-50 transition-colors">
-                      <div className="flex items-center space-x-3"><div className="w-8 h-8 rounded-full bg-fuchsia-100 flex items-center justify-center text-fuchsia-600"><i className="fas fa-flask text-xs"></i></div><span className="text-xs font-semibold text-slate-500 uppercase tracking-tight">S/C Ratio</span></div>
-                      <span className="text-2xl font-bold font-mono text-fuchsia-700">{steamToCarbonRatio.toFixed(4)}</span>
+                    <div className="px-4 py-6 flex flex-col items-center justify-center hover:bg-slate-50 transition-colors">
+                      <span className="text-[10px] font-bold text-blue-500 uppercase mb-2 flex items-center">
+                        <i className="fas fa-tint mr-1.5 text-blue-300"></i> S/C Ratio
+                      </span>
+                      <span className="text-xl font-bold font-mono text-blue-700">{steamToCarbonRatio.toFixed(4)}</span>
                     </div>
-                    <div className="px-6 py-5 flex items-center justify-between hover:bg-slate-50 transition-colors">
-                      <div className="flex items-center space-x-3"><div className="w-8 h-8 rounded-full bg-amber-100 flex items-center justify-center text-amber-600"><i className="fas fa-tachometer-alt text-xs"></i></div><span className="text-xs font-semibold text-slate-500 uppercase tracking-tight">Front End Load</span></div>
-                      <div className="text-right"><span className="text-2xl font-bold font-mono text-amber-700">{(frontEndLoad * 100).toFixed(2)}</span><span className="text-xs font-bold text-amber-500 ml-1">%</span></div>
+                    <div className="px-4 py-6 flex flex-col items-center justify-center hover:bg-slate-50 transition-colors border-t border-slate-100">
+                      <span className="text-[10px] font-bold text-amber-500 uppercase mb-2 flex items-center">
+                        <i className="fas fa-weight-hanging mr-1.5 text-amber-300"></i> Front End Load
+                      </span>
+                      <div className="flex items-baseline"><span className="text-xl font-bold font-mono text-amber-700">{(frontEndLoad * 100).toFixed(2)}</span><span className="text-xs font-bold text-amber-500 ml-1">%</span></div>
+                    </div>
+                    <div className="px-4 py-6 flex flex-col items-center justify-center hover:bg-slate-50 transition-colors border-t border-slate-100">
+                      <span className="text-[10px] font-bold text-emerald-500 uppercase mb-2 flex items-center">
+                        <i className="fas fa-exchange-alt mr-1.5 text-emerald-300"></i> Gas/Air Ratio
+                      </span>
+                      <span className="text-xl font-bold font-mono text-emerald-700">{gasToAirRatio.toFixed(4)}</span>
                     </div>
                   </div>
                 </div>
               </div>
-            </div>
+
+              {/* 1. Process Gas */}
+              <div className="bg-white p-6 rounded-lg border border-slate-200 shadow-sm border-l-4 border-l-slate-700">
+                <div className="flex items-center space-x-3 border-b border-gray-100 pb-3 mb-6"><div className="bg-slate-100 p-2 rounded-full"><i className="fas fa-gas-pump text-slate-600"></i></div><h3 className="text-lg font-bold text-gray-800">1. Process Gas Specification (Dry)</h3></div>
+                <div className="bg-slate-50 p-4 rounded-lg border border-slate-100 max-w-md mb-6"><label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider text-center">Process Gas Flow</label><div className="relative mt-2"><input type="number" step="any" onFocus={handleFocus} value={processGasFlow} onChange={e => setProcessGasFlow(parseFloat(e.target.value) || 0)} className="w-full border border-slate-200 rounded-md p-2 pr-16 font-mono text-lg text-slate-800 focus:ring-2 focus:ring-slate-500 outline-none bg-white shadow-inner text-center"/><span className="absolute right-3 inset-y-0 flex items-center text-[10px] font-bold text-slate-400 pointer-events-none">NMC/hr</span></div></div>
+                <StreamTable title="Dry Process Gas Components" data={plantData.processGas} isEditable onPercentEdit={(comp, percent) => setProcessGasPercents(prev => ({ ...prev, [comp]: percent }))} componentsToShow={COMPONENTS.filter(c => c !== 'H2O')} hideWetPercent inputMode="dryPercentOnly"/>
+              </div>
+
+              {/* 2. Recycle Gas */}
+              <div className="bg-white p-6 rounded-lg border border-teal-200 shadow-sm border-l-4 border-l-teal-600">
+                <div className="flex items-center space-x-3 border-b border-gray-100 pb-3 mb-6"><div className="bg-teal-100 p-2 rounded-full"><i className="fas fa-rotate text-teal-600"></i></div><h3 className="text-lg font-bold text-gray-800">2. Recycle Gas Specification (Dry)</h3></div>
+                <div className="bg-teal-50 p-4 rounded-lg border border-teal-100 max-w-md mb-6"><label className="block text-[10px] font-bold text-teal-600 uppercase tracking-wider text-center">Recycle Gas Flow</label><div className="relative mt-2"><input type="number" step="any" onFocus={handleFocus} value={recycleGasFlow} onChange={e => setRecycleGasFlow(parseFloat(e.target.value) || 0)} className="w-full border border-teal-200 rounded-md p-2 pr-16 font-mono text-lg text-teal-800 focus:ring-2 focus:ring-teal-500 outline-none bg-white shadow-inner text-center"/><span className="absolute right-3 inset-y-0 flex items-center text-[10px] font-bold text-teal-400 pointer-events-none">NMC/hr</span></div></div>
+                <StreamTable title="Dry Recycle Gas Components" data={plantData.recycleGas} isEditable onPercentEdit={(comp, percent) => setRecycleGasPercents(prev => ({ ...prev, [comp]: percent }))} componentsToShow={COMPONENTS.filter(c => c !== 'H2O')} hideWetPercent inputMode="dryPercentOnly"/>
+              </div>
+
+              {/* 3. Steam */}
+              <div className="bg-white p-6 rounded-lg border border-blue-200 shadow-sm border-l-4 border-l-blue-600">
+                <div className="flex items-center space-x-3 border-b border-gray-100 pb-3 mb-6"><div className="bg-blue-100 p-2 rounded-full"><i className="fas fa-faucet-detergent text-blue-600"></i></div><h3 className="text-lg font-bold text-gray-800">3. Steam Specification</h3></div>
+                <div className="bg-blue-50 p-4 rounded-lg border border-blue-100 max-w-md mb-6"><label className="block text-[10px] font-bold text-blue-500 uppercase tracking-wider text-center">Steam Flow Rate</label><div className="relative mt-2"><input type="number" step="any" onFocus={handleFocus} value={steamFlowTons} onChange={e => setSteamFlowTons(parseFloat(e.target.value) || 0)} className="w-full border border-blue-200 rounded-md p-2 pr-16 font-mono text-lg text-blue-800 focus:ring-2 focus:ring-blue-500 outline-none bg-white shadow-inner text-center"/><span className="absolute right-3 inset-y-0 flex items-center text-[10px] font-bold text-blue-400 pointer-events-none">Tons/hr</span></div></div>
+              </div>
+
+              {/* 4. Feed Gas Specification (PRIMARY REFORMER Inlet) */}
+              <div className="bg-white p-6 rounded-lg border border-emerald-200 shadow-sm border-l-4 border-l-emerald-600">
+                <div className="flex items-center space-x-3 border-b border-gray-100 pb-3 mb-6">
+                  <div className="bg-emerald-100 p-2 rounded-full"><i className="fas fa-shuffle text-emerald-600"></i></div>
+                  <h3 className="text-lg font-bold text-gray-800">4. Feed Gas Specification (Combined Feed)</h3>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                  <div className="bg-emerald-50 p-4 rounded-lg border border-emerald-100 text-center">
+                    <div className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest mb-1 text-center">Feed Gas Flow (NMC/hr)</div>
+                    <div className="text-xl font-mono font-bold text-emerald-800 text-center">{feedGasCalculated.totalVolume.toFixed(2)}</div>
+                  </div>
+                  <div className="bg-emerald-50 p-4 rounded-lg border border-emerald-100 text-center">
+                    <div className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest mb-1 text-center">Feed Gas Flow (Kgmol/hr)</div>
+                    <div className="text-xl font-mono font-bold text-emerald-800 text-center">{feedGasCalculated.totalMoles.toFixed(4)}</div>
+                  </div>
+                </div>
+                <StreamTable title="PRIMARY REFORMER Inlet (PG + RG + Steam)" data={feedGasCalculated} readOnlyFlows/>
+              </div>
+
+              {/* 5. Air Feed */}
+              <div className="bg-white p-6 rounded-lg border border-orange-200 shadow-sm border-l-4 border-l-orange-600">
+                <div className="flex items-center space-x-3 border-b border-gray-100 pb-3 mb-6"><div className="bg-orange-100 p-2 rounded-full"><i className="fas fa-wind text-orange-600"></i></div><h3 className="text-lg font-bold text-gray-800">5. Air Feed Specification</h3></div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                  <div className="bg-orange-50 p-4 rounded-lg border border-orange-100"><label className="block text-[10px] font-bold text-orange-600 uppercase tracking-wider text-center">Air Flow</label><div className="relative mt-2"><input type="number" step="any" onFocus={handleFocus} value={processAirFlow} onChange={e => setProcessAirFlow(parseFloat(e.target.value) || 0)} className="w-full border border-orange-200 rounded-md p-2 pr-12 font-mono text-lg text-orange-800 outline-none bg-white shadow-inner text-center"/><span className="absolute right-3 inset-y-0 flex items-center text-[10px] font-bold text-orange-400 pointer-events-none">NMC/hr</span></div></div>
+                  <div className="bg-sky-50 p-4 rounded-lg border border-sky-100"><label className="block text-[10px] font-bold text-sky-600 uppercase tracking-wider text-center">Rel. Humidity</label><div className="relative mt-2"><input type="number" step="any" onFocus={handleFocus} value={relativeHumidity} onChange={e => setRelativeHumidity(parseFloat(e.target.value) || 0)} className="w-full border border-sky-200 rounded-md p-2 pr-8 font-mono text-lg text-sky-800 outline-none bg-white shadow-inner text-center"/><span className="absolute right-3 inset-y-0 flex items-center text-lg font-bold text-sky-400 pointer-events-none">%</span></div></div>
+                  <div className="bg-amber-50 p-4 rounded-lg border border-amber-100"><label className="block text-[10px] font-bold text-amber-600 uppercase tracking-wider text-center">Amb. Temp</label><div className="relative mt-2"><input type="number" step="any" onFocus={handleFocus} value={ambientTemp} onChange={e => setAmbientTemp(parseFloat(e.target.value) || 0)} className="w-full border border-amber-200 rounded-md p-2 pr-8 font-mono text-lg text-amber-800 outline-none bg-white shadow-inner text-center"/><span className="absolute right-3 inset-y-0 flex items-center text-lg font-bold text-amber-400 pointer-events-none">°C</span></div></div>
+                </div>
+                <StreamTable title="Air Feed Components" data={plantData.air} isEditable onPercentEdit={(comp, percent) => setAirPercents(prev => ({ ...prev, [comp]: percent }))} componentsToShow={['N2', 'O2', 'AR', 'CO2', 'H2O']} inputMode="dryPercentOnly"/>
+              </div>
+            </>
           )}
 
           {activeTab === 'primary' && (
             <div className="space-y-6">
-              <div className="bg-white p-6 rounded-lg border border-blue-200 shadow-sm border-l-4 border-l-blue-500">
-                <div className="flex flex-col space-y-4">
-                  <div className="flex items-center space-x-3 border-b border-gray-100 pb-3"><div className="bg-blue-100 p-2 rounded-full"><i className="fas fa-burn text-blue-600"></i></div><h3 className="text-lg font-bold text-gray-800">Primary Reformer Control Station</h3></div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <div className="bg-blue-50/50 p-4 rounded-lg border border-blue-100">
-                      <label className="block text-xs font-bold text-blue-700 uppercase">Primary CH4 Conversion</label>
-                      <div className="relative mt-2">
-                        <input type="number" step="0.0001" min="0" max="100" onFocus={handleFocus} value={params.primaryCh4Conv === 0 ? "0" : Number((params.primaryCh4Conv * 100).toFixed(4))} onChange={e => setParams({...params, primaryCh4Conv: (parseFloat(e.target.value) || 0) / 100})} className="w-full border border-blue-200 rounded-md p-3 pr-12 font-mono text-lg text-blue-700 focus:ring-2 focus:ring-blue-500 outline-none bg-white shadow-inner"/>
-                        <span className="absolute right-4 top-3.5 text-lg font-mono font-bold text-blue-400">%</span>
-                      </div>
-                    </div>
-                    <div className="bg-blue-50/50 p-4 rounded-lg border border-blue-100">
-                      <label className="block text-xs font-bold text-blue-700 uppercase">Primary CO Conversion</label>
-                      <div className="relative mt-2">
-                        <input type="number" step="0.0001" min="0" max="100" onFocus={handleFocus} value={params.primaryCoConv === 0 ? "0" : Number((params.primaryCoConv * 100).toFixed(4))} onChange={e => setParams({...params, primaryCoConv: (parseFloat(e.target.value) || 0) / 100})} className="w-full border border-blue-200 rounded-md p-3 pr-12 font-mono text-lg text-blue-700 focus:ring-2 focus:ring-blue-500 outline-none bg-white shadow-inner"/>
-                        <span className="absolute right-4 top-3.5 text-lg font-mono font-bold text-blue-400">%</span>
-                      </div>
-                    </div>
+              {renderOpTable('primary')}
+              <div className="bg-white p-6 rounded-lg border border-blue-200 shadow-sm mb-6">
+                <h3 className="text-lg font-bold text-blue-800 border-b pb-3 mb-4">Reformer Kinetics Control</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-500 uppercase mb-2 text-center">CH4 Conversion (%)</label>
+                    <input type="number" step="0.01" onFocus={handleFocus} value={params.primaryCh4Conv * 100} onChange={e => setParams({...params, primaryCh4Conv: parseFloat(e.target.value)/100})} className="w-full border rounded p-2 font-mono focus:ring-2 focus:ring-blue-500 outline-none text-center"/>
                   </div>
-                  {renderOpControlRow('primary')}
+                  <div>
+                    <label className="block text-xs font-bold text-slate-500 uppercase mb-2 text-center">CO Conversion (%)</label>
+                    <input 
+                      type="number" 
+                      step="0.0001" 
+                      onFocus={handleFocus} 
+                      value={Number((params.primaryCoConv * 100).toFixed(4))} 
+                      onChange={e => setParams({...params, primaryCoConv: parseFloat(e.target.value)/100})} 
+                      className="w-full border rounded p-2 font-mono focus:ring-2 focus:ring-blue-500 outline-none text-center"
+                    />
+                  </div>
                 </div>
               </div>
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                <StreamTable title="PRIMARY REFORMER Inlet" data={plantData.primary.inlet} />
-                <StreamTable title="PRIMARY REFORMER Outlet" data={plantData.primary.outlet} />
-              </div>
-              {renderDownloadButtons()}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8"><StreamTable title="Primary Reformer Inlet" data={plantData.primary.inlet} /><StreamTable title="Primary Reformer Outlet" data={plantData.primary.outlet} /></div>
             </div>
           )}
 
           {activeTab === 'secondary' && (
             <div className="space-y-6">
-              <div className="bg-white p-6 rounded-lg border border-orange-200 shadow-sm border-l-4 border-l-orange-500">
-                <div className="flex flex-col space-y-4">
-                  <div className="flex items-center space-x-3 border-b border-gray-100 pb-3"><div className="bg-orange-100 p-2 rounded-full"><i className="fas fa-wind text-orange-600"></i></div><h3 className="text-lg font-bold text-gray-800">Secondary Reformer Control Station</h3></div>
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                    <div className="bg-orange-50/50 p-4 rounded-lg border border-orange-100">
-                      <label className="block text-xs font-bold text-orange-700 uppercase">Secondary CH4 Conversion</label>
-                      <div className="relative mt-2">
-                        <input type="number" step="0.0001" min="0" max="100" onFocus={handleFocus} value={params.secondaryCh4Conv === 0 ? "0" : Number((params.secondaryCh4Conv * 100).toFixed(4))} onChange={e => setParams({...params, secondaryCh4Conv: (parseFloat(e.target.value) || 0) / 100})} className="w-full border border-orange-200 rounded-md p-3 pr-12 font-mono text-lg text-orange-700 focus:ring-2 focus:ring-blue-500 outline-none bg-white shadow-inner"/>
-                        <span className="absolute right-4 top-3.5 text-lg font-mono font-bold text-orange-400">%</span>
-                      </div>
-                    </div>
-                    <div className="bg-orange-50/50 p-4 rounded-lg border border-orange-100">
-                      <label className="block text-xs font-bold text-orange-700 uppercase">Secondary CO Conversion</label>
-                      <div className="relative mt-2">
-                        <input type="number" step="0.0001" min="0" max="100" onFocus={handleFocus} value={params.secondaryCoConv === 0 ? "0" : Number((params.secondaryCoConv * 100).toFixed(4))} onChange={e => setParams({...params, secondaryCoConv: (parseFloat(e.target.value) || 0) / 100})} className="w-full border border-orange-200 rounded-md p-3 pr-12 font-mono text-lg text-orange-700 focus:ring-2 focus:ring-blue-500 outline-none bg-white shadow-inner"/>
-                        <span className="absolute right-4 top-3.5 text-lg font-mono font-bold text-orange-400">%</span>
-                      </div>
-                    </div>
-                    <div className="bg-orange-50/50 p-4 rounded-lg border border-orange-100">
-                      <label className="block text-xs font-bold text-orange-700 uppercase">Secondary O2 Conversion</label>
-                      <div className="relative mt-2">
-                        <input type="number" step="0.0001" min="0" max="100" onFocus={handleFocus} value={params.secondaryO2Conv === 0 ? "0" : Number((params.secondaryO2Conv * 100).toFixed(4))} onChange={e => setParams({...params, secondaryO2Conv: (parseFloat(e.target.value) || 0) / 100})} className="w-full border border-orange-200 rounded-md p-3 pr-12 font-mono text-lg text-orange-700 focus:ring-2 focus:ring-blue-500 outline-none bg-white shadow-inner"/>
-                        <span className="absolute right-4 top-3.5 text-lg font-mono font-bold text-orange-400">%</span>
-                      </div>
-                    </div>
+              {renderOpTable('secondary')}
+              <div className="bg-white p-6 rounded-lg border border-orange-200 shadow-sm mb-6">
+                <h3 className="text-lg font-bold text-orange-800 border-b pb-3 mb-4">Secondary Reforming Controls</h3>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  <div><label className="block text-xs font-bold text-slate-500 uppercase mb-2 text-center">CH4 Conversion (%)</label><input type="number" step="0.01" onFocus={handleFocus} value={params.secondaryCh4Conv * 100} onChange={e => setParams({...params, secondaryCh4Conv: parseFloat(e.target.value)/100})} className="w-full border rounded p-2 font-mono focus:ring-2 focus:ring-orange-500 outline-none text-center"/></div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-500 uppercase mb-2 text-center">CO Conversion (%)</label>
+                    <input 
+                      type="number" 
+                      step="0.0001" 
+                      onFocus={handleFocus} 
+                      value={Number((params.secondaryCoConv * 100).toFixed(4))} 
+                      onChange={e => setParams({...params, secondaryCoConv: parseFloat(e.target.value)/100})} 
+                      className="w-full border rounded p-2 font-mono focus:ring-2 focus:ring-orange-500 outline-none text-center"
+                    />
                   </div>
-                  {renderOpControlRow('secondary')}
+                  <div><label className="block text-xs font-bold text-slate-500 uppercase mb-2 text-center">O2 Conversion (%)</label><input type="number" step="0.01" onFocus={handleFocus} value={params.secondaryO2Conv * 100} onChange={e => setParams({...params, secondaryO2Conv: parseFloat(e.target.value)/100})} className="w-full border rounded p-2 font-mono focus:ring-2 focus:ring-orange-500 outline-none text-center"/></div>
                 </div>
               </div>
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                <StreamTable title="SECONDARY REFORMER Inlet" data={plantData.secondary.inlet} />
-                <StreamTable title="SECONDARY REFORMER Outlet" data={plantData.secondary.outlet} />
-              </div>
-              {renderDownloadButtons()}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8"><StreamTable title="Secondary Reformer Inlet" data={plantData.secondary.inlet} /><StreamTable title="Secondary Reformer Outlet" data={plantData.secondary.outlet} /></div>
             </div>
           )}
 
           {activeTab === 'hts' && (
             <div className="space-y-6">
-              <div className="bg-white p-6 rounded-lg border border-blue-200 shadow-sm border-l-4 border-l-blue-600">
-                <div className="flex flex-col space-y-4">
-                  <div className="flex items-center space-x-3 border-b border-gray-100 pb-3"><div className="bg-blue-100 p-2 rounded-full"><i className="fas fa-angle-double-up text-blue-600"></i></div><h3 className="text-lg font-bold text-gray-800">HTS Shift Control Station</h3></div>
-                  <div className="bg-blue-50/50 p-4 rounded-lg border border-blue-100 max-w-sm"><label className="block text-xs font-bold text-blue-700 uppercase">HTS CO Conversion</label><div className="relative mt-2"><input type="number" step="0.0001" min="0" max="100" onFocus={handleFocus} value={params.htsCoConv === 0 ? "0" : Number((params.htsCoConv * 100).toFixed(4))} onChange={e => setParams({...params, htsCoConv: (parseFloat(e.target.value) || 0) / 100})} className="w-full border border-blue-200 rounded-md p-3 pr-12 font-mono text-lg text-blue-700 focus:ring-2 focus:ring-blue-500 outline-none bg-white shadow-inner"/><span className="absolute right-4 top-3.5 text-lg font-mono font-bold text-blue-400">%</span></div></div>
-                  {renderOpControlRow('hts')}
-                </div>
+              {renderOpTable('hts')}
+              <div className="bg-white p-6 rounded-lg border border-emerald-200 shadow-sm mb-6 max-w-sm mx-auto">
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-2 text-center">HTS CO Conversion (%)</label>
+                <input type="number" step="0.01" onFocus={handleFocus} value={params.htsCoConv * 100} onChange={e => setParams({...params, htsCoConv: parseFloat(e.target.value)/100})} className="w-full border rounded p-2 font-mono focus:ring-2 focus:ring-emerald-500 outline-none text-center"/>
               </div>
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                <StreamTable title="HTS Inlet Stream" data={plantData.hts.inlet} />
-                <StreamTable title="HTS Outlet Stream" data={plantData.hts.outlet} />
-              </div>
-              {renderDownloadButtons()}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8"><StreamTable title="HTS Inlet" data={plantData.hts.inlet} /><StreamTable title="HTS Outlet" data={plantData.hts.outlet} /></div>
             </div>
           )}
 
           {activeTab === 'lts' && (
             <div className="space-y-6">
-              <div className="bg-white p-6 rounded-lg border border-emerald-200 shadow-sm border-l-4 border-l-emerald-600">
-                <div className="flex flex-col space-y-4">
-                  <div className="flex items-center space-x-3 border-b border-gray-100 pb-3"><div className="bg-emerald-100 p-2 rounded-full"><i className="fas fa-angle-double-down text-emerald-600"></i></div><h3 className="text-lg font-bold text-gray-800">LTS Shift Control Station</h3></div>
-                  <div className="bg-emerald-50/50 p-4 rounded-lg border border-emerald-100 max-w-sm"><label className="block text-xs font-bold text-emerald-700 uppercase">LTS CO Conversion</label><div className="relative mt-2"><input type="number" step="0.0001" min="0" max="100" onFocus={handleFocus} value={params.ltsCoConv === 0 ? "0" : Number((params.ltsCoConv * 100).toFixed(4))} onChange={e => setParams({...params, ltsCoConv: (parseFloat(e.target.value) || 0) / 100})} className="w-full border border-emerald-200 rounded-md p-3 pr-12 font-mono text-lg text-emerald-700 focus:ring-2 focus:ring-blue-500 outline-none bg-white shadow-inner"/><span className="absolute right-4 top-3.5 text-lg font-mono font-bold text-emerald-400">%</span></div></div>
-                  {renderOpControlRow('lts')}
-                </div>
+              {renderOpTable('lts')}
+              <div className="bg-white p-6 rounded-lg border border-emerald-200 shadow-sm mb-6 max-w-sm mx-auto">
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-2 text-center">LTS CO Conversion (%)</label>
+                <input type="number" step="0.01" onFocus={handleFocus} value={params.ltsCoConv * 100} onChange={e => setParams({...params, ltsCoConv: parseFloat(e.target.value)/100})} className="w-full border rounded p-2 font-mono focus:ring-2 focus:ring-emerald-500 outline-none text-center"/>
               </div>
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                <StreamTable title="LTS Inlet Stream" data={plantData.lts.inlet} />
-                <StreamTable title="LTS Outlet Stream" data={plantData.lts.outlet} />
-              </div>
-              {renderDownloadButtons()}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8"><StreamTable title="LTS Inlet" data={plantData.lts.inlet} /><StreamTable title="LTS Outlet" data={plantData.lts.outlet} /></div>
             </div>
           )}
 
           {activeTab === 'methanator' && (
             <div className="space-y-6">
-              <div className="bg-white p-6 rounded-lg border border-purple-200 shadow-sm border-l-4 border-l-purple-600">
-                <div className="flex flex-col space-y-4">
-                  <div className="flex items-center space-x-3 border-b border-gray-100 pb-3">
-                    <div className="bg-purple-100 p-2 rounded-full"><i className="fas fa-flask-vial text-purple-600"></i></div>
-                    <h3 className="text-lg font-bold text-gray-800">Methanator Control Station</h3>
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <div className="bg-purple-50/50 p-4 rounded-lg border border-purple-100">
-                      <label className="block text-xs font-bold text-purple-700 uppercase">CO Methanation Conversion</label>
-                      <div className="relative mt-2">
-                        <input type="number" step="0.0001" min="0" max="100" onFocus={handleFocus} value={params.methanatorCoConv === 0 ? "0" : Number((params.methanatorCoConv * 100).toFixed(4))} onChange={e => setParams({...params, methanatorCoConv: (parseFloat(e.target.value) || 0) / 100})} className="w-full border border-purple-200 rounded-md p-3 pr-12 font-mono text-lg text-purple-700 focus:ring-2 focus:ring-purple-500 outline-none bg-white shadow-inner"/>
-                        <span className="absolute right-4 top-3.5 text-lg font-mono font-bold text-purple-400">%</span>
-                      </div>
-                    </div>
-                    <div className="bg-fuchsia-50/50 p-4 rounded-lg border border-fuchsia-100">
-                      <label className="block text-xs font-bold text-fuchsia-700 uppercase">CO2 Methanation Conversion</label>
-                      <div className="relative mt-2">
-                        <input type="number" step="0.0001" min="0" max="100" onFocus={handleFocus} value={params.methanatorCo2Conv === 0 ? "0" : Number((params.methanatorCo2Conv * 100).toFixed(4))} onChange={e => setParams({...params, methanatorCo2Conv: (parseFloat(e.target.value) || 0) / 100})} className="w-full border border-fuchsia-200 rounded-md p-3 pr-12 font-mono text-lg text-fuchsia-700 focus:ring-2 focus:ring-fuchsia-500 outline-none bg-white shadow-inner"/>
-                        <span className="absolute right-4 top-3.5 text-lg font-mono font-bold text-fuchsia-400">%</span>
-                      </div>
-                    </div>
-                  </div>
-                  {renderOpControlRow('methanator')}
+              {renderOpTable('methanator')}
+              <div className="bg-white p-6 rounded-lg border border-purple-200 shadow-sm mb-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div><label className="block text-xs font-bold text-slate-500 uppercase mb-2 text-center">CO Conversion (%)</label><input type="number" step="0.01" onFocus={handleFocus} value={params.methanatorCoConv * 100} onChange={e => setParams({...params, methanatorCoConv: parseFloat(e.target.value)/100})} className="w-full border rounded p-2 font-mono focus:ring-2 focus:ring-purple-500 outline-none text-center"/></div>
+                  <div><label className="block text-xs font-bold text-slate-500 uppercase mb-2 text-center">CO2 Conversion (%)</label><input type="number" step="0.01" onFocus={handleFocus} value={params.methanatorCo2Conv * 100} onChange={e => setParams({...params, methanatorCo2Conv: parseFloat(e.target.value)/100})} className="w-full border rounded p-2 font-mono focus:ring-2 focus:ring-purple-500 outline-none text-center"/></div>
                 </div>
               </div>
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                <StreamTable title="METHANATOR Inlet Stream" data={plantData.methanator.inlet} isEditable onEdit={handleMethanatorInletEdit} />
-                <StreamTable title="METHANATOR Outlet Stream" data={plantData.methanator.outlet} />
+                <div className="relative">
+                  <StreamTable 
+                    title="Methanator Inlet" 
+                    data={plantData.methanator.inlet} 
+                    isEditable 
+                    onEdit={handleMethanatorInletEdit} 
+                  />
+                  {customMethanatorInlet && (
+                    <button 
+                      onClick={() => setCustomMethanatorInlet(null)}
+                      className="absolute top-2 right-24 bg-red-500 hover:bg-red-600 text-white text-[10px] px-2 py-1 rounded shadow-sm z-10 font-bold uppercase"
+                    >
+                      Reset to Calculated
+                    </button>
+                  )}
+                </div>
+                <StreamTable title="Methanator Outlet" data={plantData.methanator.outlet} />
               </div>
-              {renderDownloadButtons()}
             </div>
           )}
 
           {activeTab === 'ammoniaReactor' && (
             <div className="space-y-6">
-              <div className="bg-white p-6 rounded-lg border border-indigo-200 shadow-sm border-l-4 border-l-indigo-600">
-                <div className="flex flex-col space-y-4">
-                  <div className="flex items-center space-x-3 border-b border-gray-100 pb-3">
-                    <div className="bg-indigo-100 p-2 rounded-full"><i className="fas fa-vial-circle-check text-indigo-600"></i></div>
-                    <h3 className="text-lg font-bold text-gray-800">Ammonia Reactor Control Station</h3>
+              {renderOpTable('ammoniaReactor')}
+              <div className="bg-white p-6 rounded-lg border border-indigo-200 shadow-sm mb-6">
+                <h3 className="text-lg font-bold text-indigo-800 border-b pb-3 mb-4 flex items-center">
+                  <i className="fas fa-microchip mr-2"></i> Reactor Performance & Feed Control
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-500 uppercase mb-2 text-center">H2 Conversion (%)</label>
+                    <input 
+                      type="number" 
+                      step="0.0001" 
+                      onFocus={handleFocus} 
+                      value={Number((params.reactorConv * 100).toFixed(4))} 
+                      onChange={e => setParams({...params, reactorConv: parseFloat(e.target.value)/100})} 
+                      className="w-full border rounded p-2 font-mono focus:ring-2 focus:ring-indigo-500 outline-none text-center"
+                    />
                   </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <div className="bg-indigo-50/50 p-4 rounded-lg border border-indigo-100">
-                      <label className="block text-xs font-bold text-indigo-700 uppercase">Reactor Nitrogen Conversion</label>
-                      <div className="relative mt-2">
-                        <input type="number" step="0.0001" min="0" max="100" onFocus={handleFocus} value={params.reactorConv === 0 ? "0" : Number((params.reactorConv * 100).toFixed(4))} onChange={e => setParams({...params, reactorConv: (parseFloat(e.target.value) || 0) / 100})} className="w-full border border-indigo-200 rounded-md p-3 pr-12 font-mono text-lg text-indigo-700 focus:ring-2 focus:ring-blue-500 outline-none bg-white shadow-inner"/>
-                        <span className="absolute right-4 top-3.5 text-lg font-mono font-bold text-indigo-400">%</span>
-                      </div>
-                    </div>
-                    <div className="bg-emerald-50/50 p-4 rounded-lg border border-emerald-100">
-                      <label className="block text-xs font-bold text-emerald-700 uppercase">HN Ratio (H2/N2)</label>
-                      <div className="relative mt-2">
-                        <div className="w-full bg-white border border-emerald-200 rounded-md p-3 font-mono text-lg font-bold text-emerald-700 text-center shadow-inner">
-                          {hnRatio.toFixed(4)}
-                        </div>
-                      </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-500 uppercase mb-2 text-center">HN Ratio (H2/N2)</label>
+                    <div className="w-full border rounded p-2 font-mono bg-slate-50 text-indigo-700 font-bold text-center border-indigo-100 flex items-center justify-center h-[38px]">
+                      {(() => {
+                        const ammInlet = plantData.ammoniaReactor.inlet;
+                        const ratio = ammInlet.moles.N2 > 0 ? (ammInlet.moles.H2 / ammInlet.moles.N2) : 0;
+                        return ratio.toFixed(3);
+                      })()}
                     </div>
                   </div>
-                  {renderOpControlRow('ammoniaReactor')}
                 </div>
               </div>
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                <StreamTable 
-                  title="AMMONIA REACTOR Inlet Stream" 
-                  data={plantData.ammoniaReactor.inlet} 
-                  isEditable 
-                  onEdit={handleAmmoniaReactorInletEdit} 
-                />
-                <StreamTable title="AMMONIA REACTOR Outlet Stream" data={plantData.ammoniaReactor.outlet} />
+                <div className="relative">
+                  <StreamTable 
+                    title="Ammonia Reactor Inlet" 
+                    data={plantData.ammoniaReactor.inlet} 
+                    isEditable 
+                    onEdit={handleReactorInletEdit} 
+                  />
+                  {customReactorInlet && (
+                    <button 
+                      onClick={() => setCustomReactorInlet(null)}
+                      className="absolute top-2 right-24 bg-red-500 hover:bg-red-600 text-white text-[10px] px-2 py-1 rounded shadow-sm z-10 font-bold uppercase"
+                    >
+                      Reset to Calculated
+                    </button>
+                  )}
+                </div>
+                <StreamTable title="Reactor Outlet" data={plantData.ammoniaReactor.outlet} />
               </div>
-              {renderDownloadButtons()}
             </div>
           )}
 
-          {activeTab === 'charts' && (
-            <div className="space-y-8">
-              <div className="bg-white p-6 rounded-lg border border-gray-200 shadow-sm">
-                <h3 className="text-lg font-bold mb-6 text-center text-gray-800">Molar Composition Profile (Wet Mole %)</h3>
-                <div className="h-[450px]">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
-                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                      <XAxis dataKey="name" tick={{fill: '#64748b'}} axisLine={{stroke: '#e2e8f0'}} />
-                      <YAxis tick={{fill: '#64748b'}} axisLine={{stroke: '#e2e8f0'}} unit="%" />
-                      <Tooltip cursor={{fill: '#f8fafc'}} contentStyle={{borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'}} />
-                      <Legend verticalAlign="top" height={36}/>
-                      <Bar dataKey="Feed" fill="#94a3b8" radius={[4, 4, 0, 0]} />
-                      <Bar dataKey="P. Ref" fill="#ef4444" radius={[4, 4, 0, 0]} />
-                      <Bar dataKey="S. Ref" fill="#f97316" radius={[4, 4, 0, 0]} />
-                      <Bar dataKey="HTS" fill="#3b82f6" radius={[4, 4, 0, 0]} />
-                      <Bar dataKey="LTS" fill="#10b981" radius={[4, 4, 0, 0]} />
-                      <Bar dataKey="Meth" fill="#8b5cf6" radius={[4, 4, 0, 0]} />
-                      <Bar dataKey="React" fill="#6366f1" radius={[4, 4, 0, 0]} />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
+          {/* Centralized Action Area */}
+          <div className="flex flex-col items-center justify-center space-y-6 pt-12 pb-8">
+            <div className="flex flex-wrap items-center justify-center gap-4">
+              <button 
+                onClick={handleSave} 
+                className={`px-8 py-3 rounded-lg font-bold shadow-lg transition-all flex items-center space-x-2 ${
+                  saveStatus === 'saved' ? 'bg-emerald-600 hover:bg-emerald-700 text-white' : 'bg-slate-700 hover:bg-slate-800 text-white'
+                }`}
+              >
+                <i className={`fas ${saveStatus === 'saving' ? 'fa-spinner fa-spin' : (saveStatus === 'saved' ? 'fa-check-circle' : 'fa-save')} text-lg`}></i>
+                <span>{saveStatus === 'saving' ? 'Saving...' : (saveStatus === 'saved' ? 'Progress Saved!' : 'Save Progress')}</span>
+              </button>
+              <button 
+                onClick={handleDownloadPDF} 
+                className="bg-red-600 hover:bg-red-700 text-white px-8 py-3 rounded-lg font-bold shadow-lg transition-all flex items-center space-x-2"
+              >
+                <i className="fas fa-file-pdf text-lg"></i>
+                <span>Download PDF</span>
+              </button>
+              <button 
+                onClick={handleDownloadExcel} 
+                className="bg-emerald-600 hover:bg-emerald-700 text-white px-8 py-3 rounded-lg font-bold shadow-lg transition-all flex items-center space-x-2"
+              >
+                <i className="fas fa-file-excel text-lg"></i>
+                <span>Download Excel</span>
+              </button>
             </div>
-          )}
+            <div className="text-center">
+               {saveStatus === 'saved' && <p className="text-emerald-500 text-[10px] font-bold mt-1 uppercase animate-pulse">Simulation saved to local storage.</p>}
+            </div>
+          </div>
         </div>
       </main>
 
-      <footer className="bg-slate-900 border-t border-slate-800 p-10 mt-12 text-slate-400">
-        <div className="container mx-auto flex justify-center text-xs">
-          <div className="text-center">
-            <div className="mb-4"><i className="fas fa-calculator text-3xl text-emerald-500 opacity-80"></i></div>
-            <p className="text-slate-300 font-semibold">Developed by Muhammad Ans, Process Control Engineer.</p>
-            <p className="mt-1 opacity-50">&copy; 2026 | All rights reserved.</p>
-          </div>
+      <footer className="bg-slate-900 border-t border-slate-800 p-10 mt-12 text-slate-400 text-center text-xs">
+        <div className="container mx-auto">
+          <p className="text-slate-300 font-semibold mb-2 flex items-center justify-center">
+            <i className="fas fa-shield-halved mr-2 text-emerald-500"></i>
+            Developed by Muhammad Ans, Process Control Engineer.
+          </p>
+          <p className="opacity-50 tracking-widest uppercase">&copy; 2026 | All rights reserved.</p>
         </div>
       </footer>
-      
-      <style>{`
-        @keyframes fadeInUp { from { opacity: 0; transform: translateY(40px); } to { opacity: 1; transform: translateY(0); } }
-        .animate-fadeInUp { animation: fadeInUp 1s cubic-bezier(0.16, 1, 0.3, 1); }
-        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-        @keyframes scaleUp { from { transform: scale(0.95); opacity: 0; } to { transform: scale(1); opacity: 1; } }
-        .animate-fadeIn { animation: fadeIn 0.3s ease-out; }
-        .animate-scaleUp { animation: scaleUp 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
-      `}</style>
     </div>
   );
 };
